@@ -104,31 +104,60 @@ Implementation checkpoint (2026-07-28):
   recompute the rate and reject inconsistent, duplicate, reordered,
   overlapping, stale, or cross-run windows.
 - The app dashboard reports `produced_fps` only from that producer sequence.
-  It reports accepted, submitted, and presented FPS as unavailable until
-  their events are correlated to the same sequence.
+  `accepted_fps` remains unavailable because no honest acceptance boundary
+  exists. `submitted_fps` and `presented_fps` are exposed only when Xlorie's
+  source identity is `producer_seq`, the run IDs agree, Android display
+  timestamps are supported, and all correlation error counters are zero.
 - Xlorie redraws, Choreographer callbacks, X11 damage/Present activity,
   BufferQueue activity, release callbacks, and synthetic glxgears output are
   explicitly named stage rates in hertz. They cannot be promoted to FPS by
   the canonical analyzer.
-- Presentation correlation for the native X11 path remains incomplete. No
-  current number is accepted as uniquely presented FPS.
+- Presentation-rate correlation for the native X11 path is complete. rlawt
+  sends `_RLT_FRAME_SEQ_V1` as an ordered property request on the same X11
+  connection immediately before swap; Xlorie attaches that sequence to
+  coalesced damage, EGL submission, and the actual Android display-present
+  timestamp. Exact per-frame waterfall export remains incomplete and is
+  labeled separately from the now-valid canonical presentation rate.
 - The SM-X920 supports `EGL_ANDROID_get_frame_timestamps`, including actual
   display-present timestamps. Xlorie now keeps raw submissions/present events
   separate from unique X11-source submissions/presentations and counts
   duplicate or missing source ordinals. These source-ordinal rates remain
   diagnostic until they are joined to rlawt producer sequences.
 - The VirGL path does not invoke the instrumented X server GLX swap hook.
-  Coalesced X11 damage is therefore the first proven server-side frame
-  boundary and is used as a labeled fallback ordinal rather than pretending
-  GLX acceptance was observed.
-- A 10-second steady device capture recorded 19.569 produced FPS, 19.666
-  unique X11-source presentation events per second, zero source duplicates,
-  and zero timestamp-query or telemetry losses. All 183 redraws were
-  content-triggered. The same capture copied 4,215,569,904 bytes through the
-  X11 upload path and spent 480.123 ms of CPU time in those copies, with a
-  6.109 ms maximum copy. This establishes the full-frame X11 copy as a
-  high-priority measured seam while leaving canonical presented FPS
-  unavailable until producer correlation is complete.
+  Coalesced X11 damage remains the first proven server-side pixel boundary.
+  The ordered property marker provides identity, not acceptance, so the
+  analyzer continues to reject any attempt to infer `accepted_fps`.
+- The callback registration is keyed to Xorg `serverGeneration`. Xorg clears
+  callback lists on reset while translation-unit static storage survives; a
+  process-lifetime registration boolean previously left live markers on the
+  RuneLite window but no active consumer after startup resets. Producer
+  sequence history and error counters now reset with each generation.
+- The post-fix 10-second SM-X920 capture
+  `perf-captures/20260728-124735-ce9a6b5c-529a-4a42-8f23-33bf4f9cf1cc`
+  recorded 20.999 produced FPS, 21.009 submitted FPS, and 21.005 uniquely
+  presented FPS. It correlated 216 producer identities to 216 unique
+  submissions and 216 actual display presentations with zero duplicates,
+  missing events, marker errors, timestamp errors, or telemetry loss.
+- That capture localizes the current ceiling before X11 damage. The rlawt
+  swap boundary averaged 36.885 ms across summary-window means, the worst
+  window p95 was 52.164 ms, and the observed maximum was 56.254 ms. Those
+  are summary-window statistics rather than reconstructed raw-frame
+  percentiles. The internal VirGL transport, GPU execution, and fence-wait
+  contributions remain unresolved.
+- A later untouched 10-second checkpoint,
+  `perf-captures/20260728-124934-ce9a6b5c-529a-4a42-8f23-33bf4f9cf1cc`,
+  fell to 15.198 produced and 14.965 uniquely presented FPS while retaining
+  perfect 153/153 producer-to-display correlation. The swap window mean rose
+  to 44.437 ms and its worst window p95 to 58.588 ms. Android thermal status
+  remained `0` with 31.8 °C skin temperature, so this sample does not support
+  thermal throttling as the cause. Workload/scene variation and the unresolved
+  swap interior must be separated in the controlled campaign.
+- X11 still copied 4,557,951,216 bytes during this checkpoint, totaling
+  494.465 ms of CPU copy time with
+  a 6.194 ms maximum copy. The marker-receive-to-damage p95 was 7.708 ms and
+  damage-to-redraw p95 was 0.608 ms. The full-frame copy remains a material
+  secondary seam, but it is not large enough by itself to explain the
+  36.885 ms swap boundary.
 - The GLX acceptance hook remains absent, so accepted-to-damage latency is
   explicitly unavailable rather than reported as a misleading zero. The
   observed damage-to-redraw aggregate was 0.316 ms p50 and 0.522 ms maximum.
@@ -136,6 +165,14 @@ Implementation checkpoint (2026-07-28):
   redraw-reason masks identified cursor-only or mixed initialization work.
   Raw EGL and compositor rates must never be used as gameplay FPS because
   they can include repeated old content.
+- Script deployment now streams the 236,553-byte generated batch through
+  `bash -s` stdin instead of placing it in Android process arguments. The
+  real device deployed all 22 scripts in one 558 ms IPC call with no
+  `E2BIG` and no serial fallback.
+- Canonical analyzer rules `TBL013` and `TBL014` preserve the ordered
+  producer-to-presentation identity and stdin deployment transport. The full
+  analyzer completed in 47.565 seconds; its architecture checks completed in
+  0.422 seconds, both within their enforced budgets.
 
 ### Shared identity and clock contract
 

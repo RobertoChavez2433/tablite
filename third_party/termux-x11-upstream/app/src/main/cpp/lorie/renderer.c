@@ -175,6 +175,7 @@ static struct {
     uint64_t sourceOrdinalMissing;
     uint64_t glxOrdinalSamples;
     uint64_t damageOrdinalSamples;
+    uint64_t producerSequenceSamples;
     uint64_t contentRequestCount;
     uint64_t cursorMoveRequestCount;
     uint64_t cursorUpdateRequestCount;
@@ -188,6 +189,11 @@ static struct {
     uint64_t maxDamageToRedrawNs;
     uint64_t acceptedToDamageSamples;
     uint64_t damageToRedrawSamples;
+    uint64_t producerMarkerToDamageSamples;
+    uint64_t totalProducerMarkerSendToDamageNs;
+    uint64_t maxProducerMarkerSendToDamageNs;
+    uint64_t totalProducerMarkerReceiveToDamageNs;
+    uint64_t maxProducerMarkerReceiveToDamageNs;
 } rendererPerfStats;
 
 #define PRESENTATION_QUEUE_CAPACITY 64
@@ -197,6 +203,7 @@ typedef struct {
     EGLuint64KHR frameId;
     uint64_t sourceGeneration;
     uint64_t sourceOrdinal;
+    uint8_t ordinalSource;
     uint64_t submitMonotonicNs;
 } PendingPresentation;
 
@@ -216,11 +223,13 @@ static struct {
     uint64_t uniqueSourceSubmitCount;
     uint64_t duplicateSourceSubmitCount;
     uint64_t missingSourceSubmitCount;
+    uint64_t producerSequenceSubmitCount;
     uint64_t swapFailureCount;
     uint64_t presentedCount;
     uint64_t uniqueSourcePresentCount;
     uint64_t duplicateSourcePresentCount;
     uint64_t missingSourcePresentCount;
+    uint64_t producerSequencePresentCount;
     uint64_t invalidTimestampCount;
     uint64_t queryErrorCount;
     uint64_t telemetryLostCount;
@@ -236,6 +245,8 @@ static struct {
     uint64_t lastSubmittedSourceOrdinal;
     uint64_t lastPresentedSourceGeneration;
     uint64_t lastPresentedSourceOrdinal;
+    uint64_t firstPresentedProducerSeq;
+    uint64_t lastPresentedProducerSeq;
 } presentationTelemetry;
 
 static uint32_t lastServerTelemetryGeneration = 0;
@@ -375,6 +386,12 @@ static void presentationPoll(void) {
                 presentationTelemetry.firstUniquePresentMonotonicNs = presentNs;
             presentationTelemetry.lastUniquePresentMonotonicNs = presentNs;
         }
+        if (pending->ordinalSource == 3) {
+            presentationTelemetry.producerSequencePresentCount++;
+            if (!presentationTelemetry.firstPresentedProducerSeq)
+                presentationTelemetry.firstPresentedProducerSeq = pending->sourceOrdinal;
+            presentationTelemetry.lastPresentedProducerSeq = pending->sourceOrdinal;
+        }
         presentationPopPending();
     }
 }
@@ -388,6 +405,7 @@ static bool presentationGetNextFrameId(EGLuint64KHR *frameId) {
 static void presentationRecordSubmission(
         uint64_t sourceGeneration,
         uint64_t sourceOrdinal,
+        uint8_t ordinalSource,
         uint64_t submitMonotonicNs,
         bool swapSucceeded,
         bool frameIdValid,
@@ -399,6 +417,8 @@ static void presentationRecordSubmission(
     }
 
     presentationTelemetry.submittedCount++;
+    if (ordinalSource == 3)
+        presentationTelemetry.producerSequenceSubmitCount++;
     if (!presentationTelemetry.firstSubmitMonotonicNs)
         presentationTelemetry.firstSubmitMonotonicNs = submitMonotonicNs;
     presentationTelemetry.lastSubmitMonotonicNs = submitMonotonicNs;
@@ -431,6 +451,7 @@ static void presentationRecordSubmission(
         .frameId = frameId,
         .sourceGeneration = sourceGeneration,
         .sourceOrdinal = sourceOrdinal,
+        .ordinalSource = ordinalSource,
         .submitMonotonicNs = submitMonotonicNs,
     };
     presentationTelemetry.pendingCount++;
@@ -474,9 +495,17 @@ static void presentationLogAndResetWindow(void) {
                     presentationTelemetry.lastUniquePresentMonotonicNs -
                     presentationTelemetry.firstUniquePresentMonotonicNs)
             : 0.0;
+    bool producerSequenceIdentity =
+        presentationTelemetry.uniqueSourceSubmitCount > 0 &&
+        presentationTelemetry.uniqueSourcePresentCount > 0 &&
+        presentationTelemetry.producerSequenceSubmitCount ==
+            presentationTelemetry.submittedCount &&
+        presentationTelemetry.producerSequencePresentCount ==
+            presentationTelemetry.presentedCount;
 
     log(
         "XloriePresentationV1: capability=%s source_generation=%llu "
+        "source_identity=%s run_id=%s "
         "submit_attempts=%llu submitted_count=%llu "
         "swap_failure_count=%llu xlorie_submitted_rate_hz=%.3f "
         "unique_source_submit_count=%llu duplicate_source_submit_count=%llu "
@@ -486,9 +515,13 @@ static void presentationLogAndResetWindow(void) {
         "missing_source_present_count=%llu unique_source_present_rate_hz=%.3f "
         "pending_count=%u invalid_timestamp_count=%llu "
         "query_error_count=%llu telemetry_lost_count=%llu first_present_ns=%llu "
-        "last_present_ns=%llu",
+        "last_present_ns=%llu first_presented_producer_seq=%llu "
+        "last_presented_producer_seq=%llu presented_fps=%.3f "
+        "presented_fps_status=%s",
         presentationTelemetry.displayPresentSupported ? "supported" : "unsupported",
         (unsigned long long) sourceStateGeneration,
+        producerSequenceIdentity ? "producer_seq" : "x11_source_ordinal",
+        state && state->captureId[0] ? state->captureId : "unknown",
         (unsigned long long) presentationTelemetry.submitAttempts,
         (unsigned long long) presentationTelemetry.submittedCount,
         (unsigned long long) presentationTelemetry.swapFailureCount,
@@ -508,18 +541,26 @@ static void presentationLogAndResetWindow(void) {
         (unsigned long long) presentationTelemetry.queryErrorCount,
         (unsigned long long) presentationTelemetry.telemetryLostCount,
         (unsigned long long) presentationTelemetry.firstPresentMonotonicNs,
-        (unsigned long long) presentationTelemetry.lastPresentMonotonicNs);
+        (unsigned long long) presentationTelemetry.lastPresentMonotonicNs,
+        (unsigned long long) presentationTelemetry.firstPresentedProducerSeq,
+        (unsigned long long) presentationTelemetry.lastPresentedProducerSeq,
+        producerSequenceIdentity ? uniqueSourcePresentRateHz : 0.0,
+        producerSequenceIdentity
+            ? "valid_producer_sequence_correlated"
+            : "unavailable_no_producer_sequence_identity");
 
     presentationTelemetry.submitAttempts = 0;
     presentationTelemetry.submittedCount = 0;
     presentationTelemetry.uniqueSourceSubmitCount = 0;
     presentationTelemetry.duplicateSourceSubmitCount = 0;
     presentationTelemetry.missingSourceSubmitCount = 0;
+    presentationTelemetry.producerSequenceSubmitCount = 0;
     presentationTelemetry.swapFailureCount = 0;
     presentationTelemetry.presentedCount = 0;
     presentationTelemetry.uniqueSourcePresentCount = 0;
     presentationTelemetry.duplicateSourcePresentCount = 0;
     presentationTelemetry.missingSourcePresentCount = 0;
+    presentationTelemetry.producerSequencePresentCount = 0;
     presentationTelemetry.invalidTimestampCount = 0;
     presentationTelemetry.queryErrorCount = 0;
     presentationTelemetry.telemetryLostCount = 0;
@@ -531,6 +572,8 @@ static void presentationLogAndResetWindow(void) {
     presentationTelemetry.lastPresentMonotonicNs = 0;
     presentationTelemetry.firstUniquePresentMonotonicNs = 0;
     presentationTelemetry.lastUniquePresentMonotonicNs = 0;
+    presentationTelemetry.firstPresentedProducerSeq = 0;
+    presentationTelemetry.lastPresentedProducerSeq = 0;
 }
 
 static void rendererLogServerTelemetrySnapshot(void) {
@@ -546,8 +589,12 @@ static void rendererLogServerTelemetrySnapshot(void) {
         uint32_t windowMs = state->telemetryWindowMs;
         uint32_t damageRequests = state->telemetryDamageRequests;
         uint32_t glxSwapRequests = state->telemetryGlxSwapRequests;
+        uint32_t producerMarkers = state->telemetryProducerMarkers;
+        uint32_t producerMarkerErrors = state->telemetryProducerMarkerErrors;
         uint64_t firstGlxOrdinal = state->telemetryFirstGlxOrdinal;
         uint64_t lastGlxOrdinal = state->telemetryLastGlxOrdinal;
+        uint64_t firstProducerSeq = state->telemetryFirstProducerSeq;
+        uint64_t lastProducerSeq = state->telemetryLastProducerSeq;
         uint64_t uploadCalls = state->telemetryUploadCalls;
         uint64_t uploadBytes = state->telemetryUploadBytes;
         uint64_t uploadPixels = state->telemetryUploadPixels;
@@ -563,15 +610,21 @@ static void rendererLogServerTelemetrySnapshot(void) {
         log(
             "XlorieServerSnapshotV1: generation=%u window_ms=%u "
             "x11_damage_request_rate_hz=%.3f x11_glx_swap_request_rate_hz=%.3f "
+            "x11_producer_marker_rate_hz=%.3f producer_marker_error_count=%u "
             "first_glx_ordinal=%llu last_glx_ordinal=%llu "
+            "first_producer_seq=%llu last_producer_seq=%llu "
             "upload_call_rate_hz=%.3f upload_calls=%llu upload_bytes=%llu "
             "upload_pixels=%llu upload_copy_ns=%llu upload_copy_max_ns=%llu",
             after,
             windowMs,
             seconds > 0.0 ? damageRequests / seconds : 0.0,
             seconds > 0.0 ? glxSwapRequests / seconds : 0.0,
+            seconds > 0.0 ? producerMarkers / seconds : 0.0,
+            producerMarkerErrors,
             (unsigned long long) firstGlxOrdinal,
             (unsigned long long) lastGlxOrdinal,
+            (unsigned long long) firstProducerSeq,
+            (unsigned long long) lastProducerSeq,
             seconds > 0.0 ? uploadCalls / seconds : 0.0,
             (unsigned long long) uploadCalls,
             (unsigned long long) uploadBytes,
@@ -613,6 +666,8 @@ static void rendererLogRedrawPerfSample(
         bool cursorMoved,
         bool cursorUpdated,
         uint64_t acceptedToDamageNs,
+        uint64_t producerMarkerSendToDamageNs,
+        uint64_t producerMarkerReceiveToDamageNs,
         uint64_t damageToRedrawNs,
         uint64_t lockNs,
         uint64_t fenceNs,
@@ -659,6 +714,8 @@ static void rendererLogRedrawPerfSample(
             rendererPerfStats.glxOrdinalSamples++;
         else if (ordinalSource == 2)
             rendererPerfStats.damageOrdinalSamples++;
+        else if (ordinalSource == 3)
+            rendererPerfStats.producerSequenceSamples++;
         if (!rendererPerfStats.firstSourceOrdinal)
             rendererPerfStats.firstSourceOrdinal = sourceOrdinal;
         if (lastRendererSourceOrdinal) {
@@ -677,6 +734,19 @@ static void rendererLogRedrawPerfSample(
         rendererPerfStats.maxAcceptedToDamageNs =
             max(rendererPerfStats.maxAcceptedToDamageNs, acceptedToDamageNs);
         rendererPerfStats.acceptedToDamageSamples++;
+    }
+    if (producerMarkerSendToDamageNs && producerMarkerReceiveToDamageNs) {
+        rendererPerfStats.totalProducerMarkerSendToDamageNs +=
+            producerMarkerSendToDamageNs;
+        rendererPerfStats.maxProducerMarkerSendToDamageNs = max(
+            rendererPerfStats.maxProducerMarkerSendToDamageNs,
+            producerMarkerSendToDamageNs);
+        rendererPerfStats.totalProducerMarkerReceiveToDamageNs +=
+            producerMarkerReceiveToDamageNs;
+        rendererPerfStats.maxProducerMarkerReceiveToDamageNs = max(
+            rendererPerfStats.maxProducerMarkerReceiveToDamageNs,
+            producerMarkerReceiveToDamageNs);
+        rendererPerfStats.producerMarkerToDamageSamples++;
     }
     if (damageToRedrawNs) {
         rendererPerfStats.totalDamageToRedrawNs += damageToRedrawNs;
@@ -716,6 +786,22 @@ static void rendererLogRedrawPerfSample(
         ? rendererPerfStats.totalDamageToRedrawNs / 1000000.0 /
             (double) rendererPerfStats.damageToRedrawSamples
         : 0.0;
+    double avgProducerMarkerSendToDamageMs =
+        rendererPerfStats.producerMarkerToDamageSamples
+            ? rendererPerfStats.totalProducerMarkerSendToDamageNs / 1000000.0 /
+                (double) rendererPerfStats.producerMarkerToDamageSamples
+            : 0.0;
+    double avgProducerMarkerReceiveToDamageMs =
+        rendererPerfStats.producerMarkerToDamageSamples
+            ? rendererPerfStats.totalProducerMarkerReceiveToDamageNs / 1000000.0 /
+                (double) rendererPerfStats.producerMarkerToDamageSamples
+            : 0.0;
+    bool mixedOrdinalSources =
+        (rendererPerfStats.producerSequenceSamples > 0 &&
+            (rendererPerfStats.glxOrdinalSamples > 0 ||
+                rendererPerfStats.damageOrdinalSamples > 0)) ||
+        (rendererPerfStats.glxOrdinalSamples > 0 &&
+            rendererPerfStats.damageOrdinalSamples > 0);
 
     log(
         "XloriePerf: consumer_redraws=%llu avg_lock_ms=%.3f avg_fence_ms=%.3f avg_swap_ms=%.3f avg_redraw_ms=%.3f avg_inter_redraw_ms=%.3f xlorie_consumer_redraw_rate_hz=%.1f"
@@ -746,15 +832,20 @@ static void rendererLogRedrawPerfSample(
         "unclassified_redraw_count=%llu "
         "accepted_to_damage_sample_count=%llu accepted_to_damage_status=%s "
         "avg_accepted_to_damage_ms=%.3f max_accepted_to_damage_ms=%.3f "
+        "producer_marker_to_damage_sample_count=%llu "
+        "avg_producer_marker_send_to_damage_ms=%.3f "
+        "max_producer_marker_send_to_damage_ms=%.3f "
+        "avg_producer_marker_receive_to_damage_ms=%.3f "
+        "max_producer_marker_receive_to_damage_ms=%.3f "
         "damage_to_redraw_sample_count=%llu "
         "avg_damage_to_redraw_ms=%.3f max_damage_to_redraw_ms=%.3f",
         (unsigned long long) sourceGeneration,
         (unsigned long long) rendererPerfStats.firstSourceOrdinal,
         (unsigned long long) rendererPerfStats.lastSourceOrdinal,
-        rendererPerfStats.glxOrdinalSamples && rendererPerfStats.damageOrdinalSamples
-            ? "mixed"
-            : rendererPerfStats.glxOrdinalSamples ? "glx" :
-                rendererPerfStats.damageOrdinalSamples ? "damage" : "unavailable",
+        mixedOrdinalSources ? "mixed" :
+            rendererPerfStats.producerSequenceSamples ? "producer_seq" :
+            rendererPerfStats.glxOrdinalSamples ? "glx" :
+            rendererPerfStats.damageOrdinalSamples ? "damage" : "unavailable",
         (unsigned long long) rendererPerfStats.consumerRedrawCount,
         (unsigned long long) rendererPerfStats.sourceOrdinalGaps,
         (unsigned long long) rendererPerfStats.sourceOrdinalDuplicates,
@@ -772,6 +863,11 @@ static void rendererLogRedrawPerfSample(
             : "unavailable_no_accept_boundary",
         avgAcceptedToDamageMs,
         rendererPerfStats.maxAcceptedToDamageNs / 1000000.0,
+        (unsigned long long) rendererPerfStats.producerMarkerToDamageSamples,
+        avgProducerMarkerSendToDamageMs,
+        rendererPerfStats.maxProducerMarkerSendToDamageNs / 1000000.0,
+        avgProducerMarkerReceiveToDamageMs,
+        rendererPerfStats.maxProducerMarkerReceiveToDamageNs / 1000000.0,
         (unsigned long long) rendererPerfStats.damageToRedrawSamples,
         avgDamageToRedrawMs,
         rendererPerfStats.maxDamageToRedrawNs / 1000000.0);
@@ -802,6 +898,7 @@ static void rendererLogRedrawPerfSample(
     rendererPerfStats.sourceOrdinalMissing = 0;
     rendererPerfStats.glxOrdinalSamples = 0;
     rendererPerfStats.damageOrdinalSamples = 0;
+    rendererPerfStats.producerSequenceSamples = 0;
     rendererPerfStats.contentRequestCount = 0;
     rendererPerfStats.cursorMoveRequestCount = 0;
     rendererPerfStats.cursorUpdateRequestCount = 0;
@@ -815,6 +912,11 @@ static void rendererLogRedrawPerfSample(
     rendererPerfStats.maxDamageToRedrawNs = 0;
     rendererPerfStats.acceptedToDamageSamples = 0;
     rendererPerfStats.damageToRedrawSamples = 0;
+    rendererPerfStats.producerMarkerToDamageSamples = 0;
+    rendererPerfStats.totalProducerMarkerSendToDamageNs = 0;
+    rendererPerfStats.maxProducerMarkerSendToDamageNs = 0;
+    rendererPerfStats.totalProducerMarkerReceiveToDamageNs = 0;
+    rendererPerfStats.maxProducerMarkerReceiveToDamageNs = 0;
 }
 
 static void pthreadCondVarProxyInit(void);
@@ -1304,8 +1406,12 @@ void rendererRedrawLocked(bool* waitingForBuffers) {
     uint64_t sourceGeneration;
     uint8_t ordinalSource;
     uint64_t acceptedMonotonicNs;
+    uint64_t producerMarkerSendMonotonicNs;
+    uint64_t producerMarkerReceiveMonotonicNs;
     uint64_t damageMonotonicNs;
     uint64_t acceptedToDamageNs = 0;
+    uint64_t producerMarkerSendToDamageNs = 0;
+    uint64_t producerMarkerReceiveToDamageNs = 0;
     uint64_t damageToRedrawNs = 0;
     EGLuint64KHR platformFrameId = 0;
     bool platformFrameIdValid;
@@ -1337,6 +1443,10 @@ void rendererRedrawLocked(bool* waitingForBuffers) {
     sourceGeneration = sourceStateGeneration;
     ordinalSource = state->damageOrdinalSource;
     acceptedMonotonicNs = state->damageAcceptedMonotonicNs;
+    producerMarkerSendMonotonicNs =
+        state->damageProducerMarkerSendMonotonicNs;
+    producerMarkerReceiveMonotonicNs =
+        state->damageProducerMarkerReceiveMonotonicNs;
     damageMonotonicNs = state->damageMonotonicNs;
     contentRequested = state->drawRequested;
     cursorMoved = state->cursor.moved;
@@ -1344,6 +1454,15 @@ void rendererRedrawLocked(bool* waitingForBuffers) {
     if (sourceOrdinal && acceptedMonotonicNs &&
         damageMonotonicNs >= acceptedMonotonicNs) {
         acceptedToDamageNs = damageMonotonicNs - acceptedMonotonicNs;
+    }
+    if (sourceOrdinal && producerMarkerSendMonotonicNs &&
+        producerMarkerReceiveMonotonicNs &&
+        damageMonotonicNs >= producerMarkerSendMonotonicNs &&
+        damageMonotonicNs >= producerMarkerReceiveMonotonicNs) {
+        producerMarkerSendToDamageNs =
+            damageMonotonicNs - producerMarkerSendMonotonicNs;
+        producerMarkerReceiveToDamageNs =
+            damageMonotonicNs - producerMarkerReceiveMonotonicNs;
     }
     if (damageMonotonicNs && frameStartNs >= damageMonotonicNs)
         damageToRedrawNs = frameStartNs - damageMonotonicNs;
@@ -1391,6 +1510,7 @@ void rendererRedrawLocked(bool* waitingForBuffers) {
     presentationRecordSubmission(
         sourceGeneration,
         sourceOrdinal,
+        ordinalSource,
         rendererNowNs(),
         swapSucceeded,
         platformFrameIdValid,
@@ -1407,6 +1527,8 @@ void rendererRedrawLocked(bool* waitingForBuffers) {
         cursorMoved,
         cursorUpdated,
         acceptedToDamageNs,
+        producerMarkerSendToDamageNs,
+        producerMarkerReceiveToDamageNs,
         damageToRedrawNs,
         lockNs,
         fenceNs,

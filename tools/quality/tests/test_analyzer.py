@@ -136,7 +136,37 @@ class ArchitectureAnalyzerTest(unittest.TestCase):
             }
         )
         self.assertTrue(diagnostics)
-        self.assertTrue(all(item.code == "TBL012" for item in diagnostics))
+        frame_contract = [item for item in diagnostics if item.code == "TBL012"]
+        self.assertTrue(frame_contract)
+        self.assertTrue(all(item.rule == "frame_handoff_contract" for item in frame_contract))
+
+    def test_incomplete_producer_presentation_identity_is_rejected(self) -> None:
+        diagnostics = self._analyze(
+            {
+                "third_party/rlawt/rlawt_nix.c":
+                    'XInternAtom(display, "_RLT_FRAME_SEQ_V1", False);\n'
+            }
+        )
+        self.assertTrue(diagnostics)
+        identity_contract = [item for item in diagnostics if item.code == "TBL013"]
+        self.assertTrue(identity_contract)
+        self.assertTrue(
+            all(
+                item.rule == "producer_presentation_identity"
+                for item in identity_contract
+            )
+        )
+
+    def test_script_batch_transport_must_use_stdin(self) -> None:
+        diagnostics = self._analyze(
+            {
+                "runelite-tablet/app/src/main/java/com/runelitetablet/setup/ScriptManager.kt":
+                    'val program = "large"\n'
+                    'execute(arguments = arrayOf("-c", program))\n'
+            }
+        )
+        self.assertTrue(diagnostics)
+        self.assertTrue(all(item.code == "TBL014" for item in diagnostics))
 
     def test_fast_analyzer_contract_is_strictly_under_sixty_seconds(self) -> None:
         self.assertEqual(60_000.0, FAST_ANALYZER_BUDGET_MS)

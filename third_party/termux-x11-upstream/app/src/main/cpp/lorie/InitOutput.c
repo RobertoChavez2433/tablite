@@ -16,6 +16,7 @@
 #include <sys/errno.h>
 #include <libxcvt/libxcvt.h>
 #include <X11/X.h>
+#include <X11/Xatom.h>
 #include <X11/Xmd.h>
 #include <sys/wait.h>
 #include <present.h>
@@ -37,6 +38,7 @@
 #include "inpututils.h"
 #include "exa.h"
 #include "drm_fourcc.h"
+#include "propertyst.h"
 
 #include "lorie.h"
 
@@ -108,7 +110,12 @@ static volatile uint32_t gAhbFlushSkipped = 0;
 static uint32_t gGlxSwapRequests = 0;
 static uint64_t gGlxSwapOrdinal = 0;
 static uint64_t gDamageOrdinal = 0;
-static uint8_t gOrdinalSource = 0; /* 1=GLX hook, 2=coalesced damage fallback */
+static Atom gProducerMarkerAtom = None;
+static unsigned long gProducerMarkerCallbackGeneration = 0;
+static uint32_t gProducerMarkerRequests = 0;
+static uint32_t gProducerMarkerErrors = 0;
+static uint64_t gFirstProducerMarkerSeq = 0;
+static uint64_t gLastProducerMarkerSeq = 0;
 static uint64_t gUploadCalls = 0;
 static uint64_t gUploadBytes = 0;
 static uint64_t gUploadPixels = 0;
@@ -119,6 +126,49 @@ static uint64_t lorieMonotonicNs(void) {
     struct timespec ts = {0};
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ((uint64_t) ts.tv_sec * 1000000000ULL) + (uint64_t) ts.tv_nsec;
+}
+
+static void lorieProducerMarkerPropertyChanged(
+        unused CallbackListPtr *callbacks,
+        unused void *closure,
+        void *callData) {
+    PropertyStateRec *event = callData;
+    PropertyPtr property;
+    CARD32 *words;
+    uint64_t frameSeq;
+    uint64_t sendMonotonicNs;
+
+    if (!event || event->state != PropertyNewValue || !event->prop ||
+        event->prop->propertyName != gProducerMarkerAtom)
+        return;
+
+    property = event->prop;
+    if (property->type != XA_CARDINAL || property->format != 32 ||
+        property->size != 4 || !property->data) {
+        gProducerMarkerErrors++;
+        return;
+    }
+
+    words = property->data;
+    frameSeq = (uint64_t) words[0] | ((uint64_t) words[1] << 32);
+    sendMonotonicNs = (uint64_t) words[2] | ((uint64_t) words[3] << 32);
+    if (!frameSeq || frameSeq <= gLastProducerMarkerSeq) {
+        gProducerMarkerErrors++;
+        return;
+    }
+
+    if (!gProducerMarkerRequests)
+        gFirstProducerMarkerSeq = frameSeq;
+    gProducerMarkerRequests++;
+    gLastProducerMarkerSeq = frameSeq;
+    if (pvfb && pvfb->state) {
+        pvfb->state->producerMarkerSendMonotonicNs = sendMonotonicNs;
+        pvfb->state->producerMarkerReceiveMonotonicNs = lorieMonotonicNs();
+        __atomic_store_n(
+            &pvfb->state->producerMarkerFrameSeq,
+            frameSeq,
+            __ATOMIC_RELEASE);
+    }
 }
 
 // Sticky AHB-lock flag (Slice 4). Default 0 = preserve upstream defensive
@@ -200,6 +250,13 @@ void OsVendorInit(void) {
     pthread_condattr_init(&cond_attr);
     pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
     pthread_cond_init(&lorieScreen.state->cond, &cond_attr);
+
+    const char *captureId = getenv("RLT_CAPTURE_ID");
+    if (captureId && *captureId) {
+        strncpy(lorieScreen.state->captureId, captureId,
+                sizeof(lorieScreen.state->captureId) - 1);
+        lorieScreen.state->captureId[sizeof(lorieScreen.state->captureId) - 1] = '\0';
+    }
 }
 
 void lorieActivityConnected(void) {
@@ -469,6 +526,8 @@ static void loriePerformVblanks(void);
 static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
     int status, nonEmpty;
     uint64_t acceptedOrdinal;
+    uint64_t producerMarkerSeq;
+    uint8_t ordinalSource;
     LoriePixmapPriv* priv;
     PixmapPtr root = pScreenPtr && pScreenPtr->root ? pScreenPtr->GetWindowPixmap(pScreenPtr->root) : NULL;
     __sync_fetch_and_add(&gRedrawWakeups, 1);
@@ -510,16 +569,27 @@ static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
         }
 
         DamageEmpty(pvfb->damage);
+        producerMarkerSeq =
+            __atomic_load_n(&pvfb->state->producerMarkerFrameSeq, __ATOMIC_ACQUIRE);
         acceptedOrdinal =
             __atomic_load_n(&pvfb->state->acceptedFrameOrdinal, __ATOMIC_ACQUIRE);
-        if (!gOrdinalSource)
-            gOrdinalSource = acceptedOrdinal ? 1 : 2;
-        if (gOrdinalSource == 2)
+        if (producerMarkerSeq) {
+            acceptedOrdinal = producerMarkerSeq;
+            ordinalSource = 3;
+        } else if (acceptedOrdinal) {
+            ordinalSource = 1;
+        } else {
             acceptedOrdinal = ++gDamageOrdinal;
+            ordinalSource = 2;
+        }
         pvfb->state->damageAcceptedMonotonicNs =
-            gOrdinalSource == 1 ? pvfb->state->acceptedMonotonicNs : 0;
+            ordinalSource == 1 ? pvfb->state->acceptedMonotonicNs : 0;
+        pvfb->state->damageProducerMarkerSendMonotonicNs =
+            ordinalSource == 3 ? pvfb->state->producerMarkerSendMonotonicNs : 0;
+        pvfb->state->damageProducerMarkerReceiveMonotonicNs =
+            ordinalSource == 3 ? pvfb->state->producerMarkerReceiveMonotonicNs : 0;
         pvfb->state->damageMonotonicNs = lorieMonotonicNs();
-        pvfb->state->damageOrdinalSource = gOrdinalSource;
+        pvfb->state->damageOrdinalSource = ordinalSource;
         __atomic_store_n(
             &pvfb->state->damageFrameOrdinal,
             acceptedOrdinal,
@@ -553,6 +623,10 @@ static CARD32 lorieFramecounter(unused OsTimerPtr timer, unused CARD32 time, unu
     uint32_t ahbStickyHits = __sync_lock_test_and_set(&gAhbStickyHits, 0);
     uint32_t ahbFlushSkipped = __sync_lock_test_and_set(&gAhbFlushSkipped, 0);
     uint32_t glxSwapRequests = gGlxSwapRequests;
+    uint32_t producerMarkers = gProducerMarkerRequests;
+    uint32_t producerMarkerErrors = gProducerMarkerErrors;
+    uint64_t firstProducerSeq = gFirstProducerMarkerSeq;
+    uint64_t lastProducerSeq = gLastProducerMarkerSeq;
     uint64_t uploadCalls = gUploadCalls;
     uint64_t uploadBytes = gUploadBytes;
     uint64_t uploadPixels = gUploadPixels;
@@ -560,6 +634,9 @@ static CARD32 lorieFramecounter(unused OsTimerPtr timer, unused CARD32 time, unu
     uint64_t uploadCopyMaxNs = gUploadCopyMaxNs;
     uint64_t lastGlxOrdinal = gGlxSwapOrdinal;
     gGlxSwapRequests = 0;
+    gProducerMarkerRequests = 0;
+    gProducerMarkerErrors = 0;
+    gFirstProducerMarkerSeq = 0;
     gUploadCalls = 0;
     gUploadBytes = 0;
     gUploadPixels = 0;
@@ -579,20 +656,26 @@ static CARD32 lorieFramecounter(unused OsTimerPtr timer, unused CARD32 time, unu
         "XlorieStageRatesV1: window_ms=5000 host_vsync_callback_rate_hz=%.1f "
         "renderer_wakeup_rate_hz=%.1f x11_damage_request_rate_hz=%.1f "
         "x11_glx_swap_request_rate_hz=%.1f "
+        "x11_producer_marker_rate_hz=%.1f producer_marker_error_count=%u "
         "x11_present_attempt_rate_hz=%.1f x11_present_accepted_rate_hz=%.1f "
         "x11_present_rejected_rate_hz=%.1f x11_present_after_flip_rate_hz=%.1f "
-        "consumer_redraw_count=%u first_glx_ordinal=%llu last_glx_ordinal=%llu",
+        "consumer_redraw_count=%u first_glx_ordinal=%llu last_glx_ordinal=%llu "
+        "first_producer_seq=%llu last_producer_seq=%llu",
         ((float) choreographerCallbacks) / 5.0f,
         ((float) redrawWakeups) / 5.0f,
         ((float) damageRequests) / 5.0f,
         ((float) glxSwapRequests) / 5.0f,
+        ((float) producerMarkers) / 5.0f,
+        producerMarkerErrors,
         ((float) presentFlipAttempts) / 5.0f,
         ((float) presentFlipAccepted) / 5.0f,
         ((float) presentFlipRejected) / 5.0f,
         ((float) presentAfterFlips) / 5.0f,
         pvfb->state->renderedFrames,
         (unsigned long long) firstGlxOrdinal,
-        (unsigned long long) lastGlxOrdinal);
+        (unsigned long long) lastGlxOrdinal,
+        (unsigned long long) firstProducerSeq,
+        (unsigned long long) lastProducerSeq);
     log(INFO,
         "XlorieCopyStatsV1: window_ms=5000 upload_call_rate_hz=%.1f "
         "upload_calls=%llu upload_bytes=%llu upload_pixels=%llu "
@@ -612,8 +695,12 @@ static CARD32 lorieFramecounter(unused OsTimerPtr timer, unused CARD32 time, unu
     pvfb->state->telemetryWindowMs = 5000;
     pvfb->state->telemetryDamageRequests = damageRequests;
     pvfb->state->telemetryGlxSwapRequests = glxSwapRequests;
+    pvfb->state->telemetryProducerMarkers = producerMarkers;
+    pvfb->state->telemetryProducerMarkerErrors = producerMarkerErrors;
     pvfb->state->telemetryFirstGlxOrdinal = firstGlxOrdinal;
     pvfb->state->telemetryLastGlxOrdinal = lastGlxOrdinal;
+    pvfb->state->telemetryFirstProducerSeq = firstProducerSeq;
+    pvfb->state->telemetryLastProducerSeq = lastProducerSeq;
     pvfb->state->telemetryUploadCalls = uploadCalls;
     pvfb->state->telemetryUploadBytes = uploadBytes;
     pvfb->state->telemetryUploadPixels = uploadPixels;
@@ -906,6 +993,35 @@ void InitOutput(ScreenInfo * screen_info, int argc, char **argv) {
     rendererTestCapabilities(&pvfb->root.legacyDrawing, &pvfb->root.flip);
     xorgGlxCreateVendor();
     lorieInitClipboard();
+    gProducerMarkerAtom = MakeAtom(
+        "_RLT_FRAME_SEQ_V1",
+        strlen("_RLT_FRAME_SEQ_V1"),
+        TRUE);
+    /*
+     * Xorg clears callback lists when its server generation resets, while
+     * this translation unit's static storage survives. Register once per
+     * generation instead of using a process-lifetime boolean, otherwise the
+     * first reset leaves producer markers present on the window but invisible
+     * to the correlation state machine.
+     */
+    if (gProducerMarkerCallbackGeneration != serverGeneration) {
+        if (!AddCallback(
+                &PropertyStateCallback,
+                lorieProducerMarkerPropertyChanged,
+                NULL)) {
+            FatalError("Couldn't register producer marker callback\n");
+        }
+        gProducerMarkerCallbackGeneration = serverGeneration;
+        gProducerMarkerRequests = 0;
+        gProducerMarkerErrors = 0;
+        gFirstProducerMarkerSeq = 0;
+        gLastProducerMarkerSeq = 0;
+        log(
+            INFO,
+            "Producer marker callback registered serverGeneration=%lu atom=%lu",
+            serverGeneration,
+            (unsigned long) gProducerMarkerAtom);
+    }
 
     if (-1 == AddScreen(lorieScreenInit, argc, argv)) {
         FatalError("Couldn't add screen\n");

@@ -111,6 +111,9 @@ typedef struct {
 	struct timespec last_post_swap_ts; /* zero-initialized; zero means "no prior frame" */
 	uint64_t producer_interval_ns_sum; /* exact post-swap to post-swap elapsed time */
 	uint64_t producer_interval_count;  /* distinct producer-sequence intervals in current window */
+	Atom frame_marker_atom;   /* ordered _RLT_FRAME_SEQ_V1 property marker */
+	uint64_t marker_count_window;
+	uint64_t marker_error_count_window;
 
 	uint64_t *swap_samples;  /* window-sized; allocated once at createGLContext */
 	uint64_t *gap_samples;

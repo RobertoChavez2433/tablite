@@ -132,9 +132,15 @@ if ($rows.Count -ge 2 -and $csvIntegrityIssues.Count -eq 0) {
     $producedFpsStatus = "invalid_csv_sequence_or_clock_order"
 }
 
-$missed = @($producerIntervalsNs | Where-Object { $_ -gt ($deadlineNs + 100000.0) }).Count
-$stalls = @($producerIntervalsNs | Where-Object { $_ -gt 50000000.0 }).Count
-$missRate = if ($producerIntervalsNs.Count -gt 0) { 100.0 * $missed / $producerIntervalsNs.Count } else { $null }
+$missed = if ($producerIntervalsNs.Count -gt 0) {
+    @($producerIntervalsNs | Where-Object { $_ -gt ($deadlineNs + 100000.0) }).Count
+} else { $null }
+$stalls = if ($producerIntervalsNs.Count -gt 0) {
+    @($producerIntervalsNs | Where-Object { $_ -gt 50000000.0 }).Count
+} else { $null }
+$missRate = if ($producerIntervalsNs.Count -gt 0) {
+    100.0 * $missed / $producerIntervalsNs.Count
+} else { $null }
 
 $captureId = $null
 $launcherContext = Get-ChildItem -LiteralPath $capturePath -Recurse -File -Filter "launcher-context.txt" |
@@ -149,6 +155,8 @@ if ($null -ne $launcherContext) {
 $xlorieConsumerRedrawRateHzValues = New-Object System.Collections.Generic.List[double]
 $x11GlxSwapRequestRateHzValues = New-Object System.Collections.Generic.List[double]
 $x11DamageRequestRateHzValues = New-Object System.Collections.Generic.List[double]
+$x11ProducerMarkerRateHzValues = New-Object System.Collections.Generic.List[double]
+$producerMarkerErrorCounts = New-Object System.Collections.Generic.List[long]
 $x11UploadCallRateHzValues = New-Object System.Collections.Generic.List[double]
 $x11UploadBytesValues = New-Object System.Collections.Generic.List[long]
 $x11UploadCopyNsValues = New-Object System.Collections.Generic.List[long]
@@ -158,6 +166,10 @@ $displayPresentEventRateHzValues = New-Object System.Collections.Generic.List[do
 $uniqueSourceSubmitRateHzValues = New-Object System.Collections.Generic.List[double]
 $uniqueSourcePresentRateHzValues = New-Object System.Collections.Generic.List[double]
 $presentationCapabilities = New-Object System.Collections.Generic.List[string]
+$presentationSourceIdentities = New-Object System.Collections.Generic.List[string]
+$presentationRunIds = New-Object System.Collections.Generic.List[string]
+$presentationFirstProducerSeqs = New-Object System.Collections.Generic.List[long]
+$presentationLastProducerSeqs = New-Object System.Collections.Generic.List[long]
 $presentationSubmittedCounts = New-Object System.Collections.Generic.List[long]
 $presentationPresentedCounts = New-Object System.Collections.Generic.List[long]
 $presentationUniqueSubmitCounts = New-Object System.Collections.Generic.List[long]
@@ -181,7 +193,17 @@ $mixedReasonRedrawCounts = New-Object System.Collections.Generic.List[long]
 $unclassifiedRedrawCounts = New-Object System.Collections.Generic.List[long]
 $acceptedToDamageMsValues = New-Object System.Collections.Generic.List[double]
 $damageToRedrawMsValues = New-Object System.Collections.Generic.List[double]
+$producerMarkerSendToDamageMsValues = New-Object System.Collections.Generic.List[double]
+$producerMarkerReceiveToDamageMsValues = New-Object System.Collections.Generic.List[double]
 $acceptedToDamageStatuses = New-Object System.Collections.Generic.List[string]
+$rlawtSwapMeanMsValues = New-Object System.Collections.Generic.List[double]
+$rlawtSwapP50MsValues = New-Object System.Collections.Generic.List[double]
+$rlawtSwapP95MsValues = New-Object System.Collections.Generic.List[double]
+$rlawtSwapMaxMsValues = New-Object System.Collections.Generic.List[double]
+$rlawtGapMeanMsValues = New-Object System.Collections.Generic.List[double]
+$rlawtGapP50MsValues = New-Object System.Collections.Generic.List[double]
+$rlawtGapP95MsValues = New-Object System.Collections.Generic.List[double]
+$rlawtGapMaxMsValues = New-Object System.Collections.Generic.List[double]
 $producerWindowsByKey = @{}
 $producerWindowInvalidCount = 0
 $producerWindowDuplicateCount = 0
@@ -217,6 +239,13 @@ $telemetryLogFiles | ForEach-Object {
                 $x11DamageRequestRateHzValues.Add(
                     [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture))
             }
+            if ($_ -match "x11_producer_marker_rate_hz=([0-9]+(?:\.[0-9]+)?)") {
+                $x11ProducerMarkerRateHzValues.Add(
+                    [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture))
+            }
+            if ($_ -match "producer_marker_error_count=([0-9]+)") {
+                $producerMarkerErrorCounts.Add([long]$Matches[1])
+            }
         }
         if (
             ($hasMirroredServerSnapshots -and $_ -match "XlorieServerSnapshotV1:") -or
@@ -239,6 +268,18 @@ $telemetryLogFiles | ForEach-Object {
         if ($_ -match "XloriePresentationV1:") {
             if ($_ -match "capability=([a-z_]+)") {
                 $presentationCapabilities.Add($Matches[1])
+            }
+            if ($_ -match "source_identity=([a-z0-9_]+)") {
+                $presentationSourceIdentities.Add($Matches[1])
+            }
+            if ($_ -match "run_id=([^\s]+)") {
+                $presentationRunIds.Add($Matches[1])
+            }
+            if ($_ -match "first_presented_producer_seq=([0-9]+)") {
+                $presentationFirstProducerSeqs.Add([long]$Matches[1])
+            }
+            if ($_ -match "last_presented_producer_seq=([0-9]+)") {
+                $presentationLastProducerSeqs.Add([long]$Matches[1])
             }
             if ($_ -match "xlorie_submitted_rate_hz=([0-9]+(?:\.[0-9]+)?)") {
                 $xlorieSubmittedRateHzValues.Add(
@@ -316,6 +357,37 @@ $telemetryLogFiles | ForEach-Object {
                 $damageToRedrawMsValues.Add(
                     [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture))
             }
+            $markerSampleCount = 0
+            if ($_ -match "producer_marker_to_damage_sample_count=([0-9]+)") {
+                $markerSampleCount = [long]$Matches[1]
+            }
+            if (
+                $markerSampleCount -gt 0 -and
+                $_ -match "avg_producer_marker_send_to_damage_ms=([0-9]+(?:\.[0-9]+)?)"
+            ) {
+                $producerMarkerSendToDamageMsValues.Add(
+                    [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture))
+            }
+            if (
+                $markerSampleCount -gt 0 -and
+                $_ -match "avg_producer_marker_receive_to_damage_ms=([0-9]+(?:\.[0-9]+)?)"
+            ) {
+                $producerMarkerReceiveToDamageMsValues.Add(
+                    [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture))
+            }
+        }
+        if (
+            $isProducerWindowSource -and
+            $_ -match "\[rlawt-perf\].*swap_us mean=([0-9]+) p50=([0-9]+) p95=([0-9]+) max=([0-9]+)\s+gap_us mean=([0-9]+) p50=([0-9]+) p95=([0-9]+) max=([0-9]+)"
+        ) {
+            $rlawtSwapMeanMsValues.Add(([double]$Matches[1]) / 1000.0)
+            $rlawtSwapP50MsValues.Add(([double]$Matches[2]) / 1000.0)
+            $rlawtSwapP95MsValues.Add(([double]$Matches[3]) / 1000.0)
+            $rlawtSwapMaxMsValues.Add(([double]$Matches[4]) / 1000.0)
+            $rlawtGapMeanMsValues.Add(([double]$Matches[5]) / 1000.0)
+            $rlawtGapP50MsValues.Add(([double]$Matches[6]) / 1000.0)
+            $rlawtGapP95MsValues.Add(([double]$Matches[7]) / 1000.0)
+            $rlawtGapMaxMsValues.Add(([double]$Matches[8]) / 1000.0)
         }
         if ($isProducerWindowSource -and $_ -match "RLT_FRAME_RATE_V1\s+run_id=([^\s]+)\s+stage=producer\s+outcome=produced\s+first_seq=([0-9]+)\s+last_seq=([0-9]+)\s+interval_count=([0-9]+)\s+elapsed_ns=([0-9]+)\s+end_monotonic_ns=([0-9]+)\s+produced_fps=([0-9]+(?:\.[0-9]+)?)") {
             $windowRunId = $Matches[1]
@@ -371,6 +443,78 @@ if ($null -eq $producedFps -and $rows.Count -eq 0 -and $producerWindows.Count -g
     $producedFpsStatus = "invalid_structured_producer_windows"
 }
 
+$producerMarkerErrorTotal = if ($producerMarkerErrorCounts.Count -gt 0) {
+    ($producerMarkerErrorCounts | Measure-Object -Sum).Sum
+} else { 0 }
+$presentationErrorTotal = @(
+    $presentationInvalidCounts,
+    $presentationQueryErrorCounts,
+    $presentationLostCounts,
+    $presentationMissingSubmitCounts,
+    $presentationMissingPresentCounts
+) | ForEach-Object {
+    if ($_.Count -gt 0) { ($_.ToArray() | Measure-Object -Sum).Sum } else { 0 }
+} | Measure-Object -Sum | Select-Object -ExpandProperty Sum
+$presentationProducerCorrelated =
+    $null -ne $captureId -and
+    $producerWindows.Count -gt 0 -and
+    $presentationSourceIdentities.Count -gt 0 -and
+    $presentationRunIds.Count -eq $presentationSourceIdentities.Count -and
+    @($presentationSourceIdentities | Where-Object { $_ -ne "producer_seq" }).Count -eq 0 -and
+    @($presentationRunIds | Where-Object { $_ -ne $captureId }).Count -eq 0 -and
+    $presentationFirstProducerSeqs.Count -eq $presentationSourceIdentities.Count -and
+    $presentationLastProducerSeqs.Count -eq $presentationSourceIdentities.Count -and
+    @($presentationFirstProducerSeqs | Where-Object { $_ -le 0 }).Count -eq 0 -and
+    @($presentationLastProducerSeqs | Where-Object { $_ -le 0 }).Count -eq 0 -and
+    $producerMarkerErrorTotal -eq 0 -and
+    $presentationErrorTotal -eq 0
+$canonicalSubmittedFps = if (
+    $presentationProducerCorrelated -and
+    $uniqueSourceSubmitRateHzValues.Count -gt 0
+) {
+    ($uniqueSourceSubmitRateHzValues | Measure-Object -Average).Average
+} else { $null }
+$canonicalPresentedFps = if (
+    $presentationProducerCorrelated -and
+    $uniqueSourcePresentRateHzValues.Count -gt 0
+) {
+    ($uniqueSourcePresentRateHzValues | Measure-Object -Average).Average
+} else { $null }
+$unsupportedOrMissing = New-Object System.Collections.Generic.List[string]
+$unsupportedOrMissing.Add("accepted_fps")
+if (-not $presentationProducerCorrelated) {
+    $unsupportedOrMissing.Add("submitted_fps")
+    $unsupportedOrMissing.Add("presented_fps")
+}
+$unsupportedOrMissing.Add("per-frame producer-correlated presentation detail events")
+$unsupportedOrMissing.Add("Mali counters unless an AGI artifact is added")
+$rlawtSwapWindowSummary = if ($rlawtSwapMeanMsValues.Count -gt 0) {
+    [ordered]@{
+        sample_windows = $rlawtSwapMeanMsValues.Count
+        statistic_scope = "distribution_of_rlawt_summary_windows_not_raw_frames"
+        mean_of_window_means_ms =
+            ($rlawtSwapMeanMsValues | Measure-Object -Average).Average
+        median_of_window_p50_ms = Get-Percentile @($rlawtSwapP50MsValues) 50
+        max_window_p95_ms =
+            ($rlawtSwapP95MsValues | Measure-Object -Maximum).Maximum
+        max_observed_ms =
+            ($rlawtSwapMaxMsValues | Measure-Object -Maximum).Maximum
+    }
+} else { $null }
+$rlawtGenerationWindowSummary = if ($rlawtGapMeanMsValues.Count -gt 0) {
+    [ordered]@{
+        sample_windows = $rlawtGapMeanMsValues.Count
+        statistic_scope = "distribution_of_rlawt_summary_windows_not_raw_frames"
+        mean_of_window_means_ms =
+            ($rlawtGapMeanMsValues | Measure-Object -Average).Average
+        median_of_window_p50_ms = Get-Percentile @($rlawtGapP50MsValues) 50
+        max_window_p95_ms =
+            ($rlawtGapP95MsValues | Measure-Object -Maximum).Maximum
+        max_observed_ms =
+            ($rlawtGapMaxMsValues | Measure-Object -Maximum).Maximum
+    }
+} else { $null }
+
 $summary = [ordered]@{
     schema_version = 1
     target_hz = $TargetHz
@@ -381,8 +525,8 @@ $summary = [ordered]@{
     rates = [ordered]@{
         produced_fps = $producedFps
         accepted_fps = $null
-        submitted_fps = $null
-        presented_fps = $null
+        submitted_fps = $canonicalSubmittedFps
+        presented_fps = $canonicalPresentedFps
         display_vsync_hz = $null
         xlorie_consumer_redraw_rate_hz = if ($xlorieConsumerRedrawRateHzValues.Count -gt 0) {
             ($xlorieConsumerRedrawRateHzValues | Measure-Object -Average).Average
@@ -392,6 +536,9 @@ $summary = [ordered]@{
         } else { $null }
         x11_damage_request_rate_hz = if ($x11DamageRequestRateHzValues.Count -gt 0) {
             ($x11DamageRequestRateHzValues | Measure-Object -Average).Average
+        } else { $null }
+        x11_producer_marker_rate_hz = if ($x11ProducerMarkerRateHzValues.Count -gt 0) {
+            ($x11ProducerMarkerRateHzValues | Measure-Object -Average).Average
         } else { $null }
         xlorie_submitted_rate_hz = if ($xlorieSubmittedRateHzValues.Count -gt 0) {
             ($xlorieSubmittedRateHzValues | Measure-Object -Average).Average
@@ -419,8 +566,16 @@ $summary = [ordered]@{
             duplicate_summary_windows_ignored = $producerWindowDuplicateCount
         }
         accepted_fps = [ordered]@{ status = "unavailable_no_correlated_accept_events" }
-        submitted_fps = [ordered]@{ status = "unavailable_no_correlated_submit_events" }
-        presented_fps = [ordered]@{ status = "unavailable_no_correlated_presentation_events" }
+        submitted_fps = [ordered]@{
+            status = if ($presentationProducerCorrelated) {
+                "valid_producer_sequence_correlated"
+            } else { "unavailable_no_correlated_submit_events" }
+        }
+        presented_fps = [ordered]@{
+            status = if ($presentationProducerCorrelated) {
+                "valid_producer_sequence_correlated_display_timestamps"
+            } else { "unavailable_no_correlated_presentation_events" }
+        }
         display_vsync_hz = [ordered]@{ status = "unavailable_not_in_frame_event_source" }
         xlorie_consumer_redraw_rate_hz = [ordered]@{
             status = if ($xlorieConsumerRedrawRateHzValues.Count -gt 0) { "valid_diagnostic_rate_only" } else { "unavailable" }
@@ -431,22 +586,34 @@ $summary = [ordered]@{
         x11_damage_request_rate_hz = [ordered]@{
             status = if ($x11DamageRequestRateHzValues.Count -gt 0) { "valid_diagnostic_rate_only" } else { "unavailable" }
         }
+        x11_producer_marker_rate_hz = [ordered]@{
+            status = if ($x11ProducerMarkerRateHzValues.Count -gt 0) {
+                "valid_ordered_producer_sequence_marker"
+            } else { "unavailable" }
+            error_count = $producerMarkerErrorTotal
+        }
         xlorie_submitted_rate_hz = [ordered]@{
             status = if ($xlorieSubmittedRateHzValues.Count -gt 0) { "valid_diagnostic_rate_only" } else { "unavailable" }
         }
         display_present_event_rate_hz = [ordered]@{
             status = if ($displayPresentEventRateHzValues.Count -gt 0) {
-                "valid_display_event_rate_unmatched_to_producer"
+                if ($presentationProducerCorrelated) {
+                    "valid_display_event_rate_with_producer_sequence_identity"
+                } else { "valid_display_event_rate_unmatched_to_producer" }
             } else { "unavailable" }
         }
         unique_source_submit_rate_hz = [ordered]@{
             status = if ($uniqueSourceSubmitRateHzValues.Count -gt 0) {
-                "valid_x11_source_ordinal_rate_not_producer_correlated"
+                if ($presentationProducerCorrelated) {
+                    "valid_producer_sequence_correlated"
+                } else { "valid_x11_source_ordinal_rate_not_producer_correlated" }
             } else { "unavailable" }
         }
         unique_source_present_rate_hz = [ordered]@{
             status = if ($uniqueSourcePresentRateHzValues.Count -gt 0) {
-                "valid_x11_source_ordinal_rate_not_producer_correlated"
+                if ($presentationProducerCorrelated) {
+                    "valid_producer_sequence_correlated_display_timestamps"
+                } else { "valid_x11_source_ordinal_rate_not_producer_correlated" }
             } else { "unavailable" }
         }
     }
@@ -461,6 +628,19 @@ $summary = [ordered]@{
         upload_copy_max_ms = if ($x11UploadCopyMaxNsValues.Count -gt 0) {
             (($x11UploadCopyMaxNsValues | Measure-Object -Maximum).Maximum) / 1000000.0
         } else { 0.0 }
+    }
+    producer_boundary = [ordered]@{
+        rlawt_swap_window_summary = $rlawtSwapWindowSummary
+        frame_generation_gap_window_summary = $rlawtGenerationWindowSummary
+        interpretation = if (
+            $null -ne $rlawtSwapWindowSummary -and
+            $rlawtSwapWindowSummary.max_window_p95_ms -gt
+                ($deadlineNs / 1000000.0)
+        ) {
+            "rlawt_swap_boundary_exceeds_target_service_budget_internal_cause_unresolved"
+        } else {
+            "no_summary_window_boundary_exceeded_target_or_data_unavailable"
+        }
     }
     x11_handoff = [ordered]@{
         source_ordinal_gaps = if ($sourceOrdinalGapCounts.Count -gt 0) {
@@ -497,6 +677,10 @@ $summary = [ordered]@{
             $acceptedToDamageStatuses[-1]
         } else { "unavailable" }
         accepted_to_damage_ms = Get-Stats @($acceptedToDamageMsValues)
+        producer_marker_send_to_damage_ms =
+            Get-Stats @($producerMarkerSendToDamageMsValues)
+        producer_marker_receive_to_damage_ms =
+            Get-Stats @($producerMarkerReceiveToDamageMsValues)
         damage_to_redraw_ms = Get-Stats @($damageToRedrawMsValues)
     }
     presentation = [ordered]@{
@@ -536,10 +720,24 @@ $summary = [ordered]@{
         telemetry_lost = if ($presentationLostCounts.Count -gt 0) {
             ($presentationLostCounts | Measure-Object -Sum).Sum
         } else { 0 }
+        source_identity = if ($presentationProducerCorrelated) {
+            "producer_seq"
+        } else { "unavailable_or_unvalidated" }
+        first_presented_producer_seq = if ($presentationFirstProducerSeqs.Count -gt 0) {
+            ($presentationFirstProducerSeqs | Measure-Object -Minimum).Minimum
+        } else { $null }
+        last_presented_producer_seq = if ($presentationLastProducerSeqs.Count -gt 0) {
+            ($presentationLastProducerSeqs | Measure-Object -Maximum).Maximum
+        } else { $null }
     }
     producer_interval_ms = Get-Stats @($producerIntervalsNs | ForEach-Object { $_ / 1000000.0 })
     frame_generation_ms = Get-Stats @($generationUs | ForEach-Object { $_ / 1000.0 })
     swap_or_submit_ms = Get-Stats @($swapUs | ForEach-Object { $_ / 1000.0 })
+    deadline_metric_status = if ($producerIntervalsNs.Count -gt 0) {
+        "valid_per_frame_intervals"
+    } else {
+        "unavailable_no_per_frame_intervals"
+    }
     missed_deadlines = $missed
     missed_deadline_percent = $missRate
     stalls_over_50ms = $stalls
@@ -548,20 +746,28 @@ $summary = [ordered]@{
         producer_frames = $rows.Count
         confidence_percent = 0.0
         exact_attribution_valid = $false
-        reason = "Display-present timestamps are source-ordinal classified but not joined to producer frame sequences."
+        reason = if ($presentationProducerCorrelated) {
+            "Canonical presentation rate is producer-sequence correlated; exact per-frame waterfall attribution still requires exported detail events."
+        } else {
+            "Display-present timestamps are not joined to validated producer frame sequences."
+        }
     }
     bottleneck = [ordered]@{
         classification = "unknown"
-        confidence = "insufficient"
-        reason = "Swap/generation proportions alone are non-causal; inspect Perfetto and presentation events."
+        confidence = if ($null -ne $rlawtSwapWindowSummary) {
+            "localized_boundary_only"
+        } else { "insufficient" }
+        reason = if (
+            $null -ne $rlawtSwapWindowSummary -and
+            $rlawtSwapWindowSummary.max_window_p95_ms -gt
+                ($deadlineNs / 1000000.0)
+        ) {
+            "The serialized rlawt swap boundary exceeds the frame budget; VirGL transport, GPU execution, and fence wait remain unresolved inside that boundary."
+        } else {
+            "Swap/generation proportions alone are non-causal; inspect Perfetto and presentation events."
+        }
     }
-    unsupported_or_missing = @(
-        "accepted_fps",
-        "submitted_fps",
-        "presented_fps",
-        "producer-correlated presentation timestamps",
-        "Mali counters unless an AGI artifact is added"
-    )
+    unsupported_or_missing = @($unsupportedOrMissing)
 }
 
 $summaryPath = Join-Path $capturePath "summary.json"
@@ -583,21 +789,24 @@ $report = @"
 - rlawt source rows: $($rows.Count); structured producer windows: $($producerWindows.Count)
 - Produced FPS: $(Format-Value $producedFps) ($producedFpsStatus)
 - Accepted FPS: unavailable
-- Submitted FPS: unavailable
-- Uniquely presented FPS: unavailable
+- Submitted FPS: $(Format-Value $canonicalSubmittedFps)
+- Uniquely presented FPS: $(Format-Value $canonicalPresentedFps)
 - Xlorie consumer redraw rate: $(Format-Value $(if ($xlorieConsumerRedrawRateHzValues.Count -gt 0) { ($xlorieConsumerRedrawRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — diagnostic only
 - X11 GLX swap request rate: $(Format-Value $(if ($x11GlxSwapRequestRateHzValues.Count -gt 0) { ($x11GlxSwapRequestRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — diagnostic until ordinal validation
 - X11 damage request rate: $(Format-Value $(if ($x11DamageRequestRateHzValues.Count -gt 0) { ($x11DamageRequestRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz")
+- Ordered producer-sequence marker rate: $(Format-Value $(if ($x11ProducerMarkerRateHzValues.Count -gt 0) { ($x11ProducerMarkerRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz"); errors: $producerMarkerErrorTotal
 - Xlorie EGL submission rate: $(Format-Value $(if ($xlorieSubmittedRateHzValues.Count -gt 0) { ($xlorieSubmittedRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — diagnostic until producer join
 - Display-present event rate: $(Format-Value $(if ($displayPresentEventRateHzValues.Count -gt 0) { ($displayPresentEventRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — raw actual EGL timestamps, including repeated source content
-- Unique X11-source submission rate: $(Format-Value $(if ($uniqueSourceSubmitRateHzValues.Count -gt 0) { ($uniqueSourceSubmitRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — source-ordinal diagnostic, not producer FPS
-- Unique X11-source presentation rate: $(Format-Value $(if ($uniqueSourcePresentRateHzValues.Count -gt 0) { ($uniqueSourcePresentRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — source-ordinal diagnostic, not producer FPS
+- Unique source submission rate: $(Format-Value $(if ($uniqueSourceSubmitRateHzValues.Count -gt 0) { ($uniqueSourceSubmitRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — $(if ($presentationProducerCorrelated) { "producer-sequence correlated" } else { "diagnostic only" })
+- Unique source presentation rate: $(Format-Value $(if ($uniqueSourcePresentRateHzValues.Count -gt 0) { ($uniqueSourcePresentRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — $(if ($presentationProducerCorrelated) { "producer-sequence correlated to actual EGL display timestamps" } else { "diagnostic only" })
 - Duplicate source submissions: $(if ($presentationDuplicateSubmitCounts.Count -gt 0) { ($presentationDuplicateSubmitCounts | Measure-Object -Sum).Sum } else { 0 }); duplicate source presentations: $(if ($presentationDuplicatePresentCounts.Count -gt 0) { ($presentationDuplicatePresentCounts | Measure-Object -Sum).Sum } else { 0 })
 - Presentation timestamp capability: $(if ($presentationCapabilities.Count -gt 0) { $presentationCapabilities[-1] } else { "unavailable" })
-- Producer deadline misses: $missed ($(Format-Value $missRate "%"))
-- Producer stalls over 50 ms: $stalls
-- Correlation confidence: 0% — exact attribution is invalid until actual presentation events are joined.
-- Bottleneck: unknown — this report does not infer CPU or IPC causality from swap/gap ratios.
+- rlawt swap boundary: window-mean $(Format-Value $(if ($null -ne $rlawtSwapWindowSummary) { $rlawtSwapWindowSummary.mean_of_window_means_ms } else { $null }) " ms"); worst window p95 $(Format-Value $(if ($null -ne $rlawtSwapWindowSummary) { $rlawtSwapWindowSummary.max_window_p95_ms } else { $null }) " ms"); max observed $(Format-Value $(if ($null -ne $rlawtSwapWindowSummary) { $rlawtSwapWindowSummary.max_observed_ms } else { $null }) " ms") — summary-window evidence, not a raw-frame percentile
+- rlawt frame-generation gap: window-mean $(Format-Value $(if ($null -ne $rlawtGenerationWindowSummary) { $rlawtGenerationWindowSummary.mean_of_window_means_ms } else { $null }) " ms"); worst window p95 $(Format-Value $(if ($null -ne $rlawtGenerationWindowSummary) { $rlawtGenerationWindowSummary.max_window_p95_ms } else { $null }) " ms")
+- Producer deadline misses: $(Format-Value $missed) ($(Format-Value $missRate "%"))
+- Producer stalls over 50 ms: $(Format-Value $stalls)
+- Correlation: $(if ($presentationProducerCorrelated) { "canonical presentation rate is producer-sequence correlated; exact per-frame waterfall attribution remains pending" } else { "producer-to-presentation identity unavailable" }).
+- Bottleneck: localized to the serialized rlawt swap boundary, whose internal VirGL/GPU/fence cause remains unknown.
 
 The detailed system trace is system.perfetto-trace. Open it in Perfetto and
 correlate scheduler, frequency, SurfaceFlinger, and frame-lifecycle tracks with

@@ -28,6 +28,7 @@
 #include "rlawt.h"
 #include <jawt_md.h>
 #include <errno.h>
+#include <X11/Xatom.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -315,6 +316,8 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_createGLContext(JNIEnv
 			}
 		}
 		ctx->perf.window = window;
+		ctx->perf.frame_marker_atom =
+			XInternAtom(ctx->dpy, "_RLT_FRAME_SEQ_V1", False);
 
 		/* Allocate rolling buffers (once, outside the hot path). */
 		ctx->perf.swap_samples   = (uint64_t *)calloc(window, sizeof(uint64_t));
@@ -623,6 +626,39 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_swapBuffers(JNIEnv *en
 		clock_gettime(CLOCK_MONOTONIC, &t_pre_swap);
 	}
 
+	/*
+	 * Ordered producer identity marker. XChangeProperty is asynchronous: it
+	 * appends a tiny request to this Display connection without a round trip.
+	 * The following swap flushes the connection, so Xlorie observes this
+	 * marker before damage caused by the corresponding swap. This does not
+	 * alter RuneLite or its GPU plugin.
+	 */
+	if (ctx->perf.frame_marker_atom != None) {
+		uint64_t frame_seq = (uint64_t)ctx->perf.frame_idx + 1ULL;
+		uint64_t marker_ns =
+			(uint64_t)t_pre_swap.tv_sec * 1000000000ULL +
+			(uint64_t)t_pre_swap.tv_nsec;
+		unsigned long marker[4] = {
+			(unsigned long)(frame_seq & 0xffffffffULL),
+			(unsigned long)(frame_seq >> 32),
+			(unsigned long)(marker_ns & 0xffffffffULL),
+			(unsigned long)(marker_ns >> 32),
+		};
+		int marker_status = XChangeProperty(
+			ctx->dpy,
+			(Window)ctx->drawable,
+			ctx->perf.frame_marker_atom,
+			XA_CARDINAL,
+			32,
+			PropModeReplace,
+			(const unsigned char *)marker,
+			4);
+		if (marker_status)
+			ctx->perf.marker_count_window++;
+		else
+			ctx->perf.marker_error_count_window++;
+	}
+
 	if (ctx->doubleBuffered) {
 		// TODO: handle -1
 		glXSwapBuffers(ctx->dpy, ctx->drawable);
@@ -735,12 +771,14 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_swapBuffers(JNIEnv *en
 			(uint64_t)t_post_swap.tv_nsec;
 		const char *capture_id = getenv("RLT_CAPTURE_ID");
 
-		RLAWT_LOG("[rlawt-perf] frame=%zu win=%zu  swap_us mean=%llu p50=%llu p95=%llu max=%llu  gap_us mean=%llu p50=%llu p95=%llu max=%llu  mkcur=%u glerr=%s%x%s%s%s\n",
+		RLAWT_LOG("[rlawt-perf] frame=%zu win=%zu  swap_us mean=%llu p50=%llu p95=%llu max=%llu  gap_us mean=%llu p50=%llu p95=%llu max=%llu  marker=%llu marker_err=%llu mkcur=%u glerr=%s%x%s%s%s\n",
 			ctx->perf.frame_idx, window,
 			(unsigned long long)swap_stats.mean, (unsigned long long)swap_stats.p50,
 			(unsigned long long)swap_stats.p95, (unsigned long long)swap_stats.max,
 			(unsigned long long)gap_stats.mean, (unsigned long long)gap_stats.p50,
 			(unsigned long long)gap_stats.p95, (unsigned long long)gap_stats.max,
+			(unsigned long long)ctx->perf.marker_count_window,
+			(unsigned long long)ctx->perf.marker_error_count_window,
 			ctx->perf.mkcur_count_window,
 			glerr ? "0x" : "", (unsigned)glerr, xsync_seg, gpu_seg, finish_seg);
 		RLAWT_LOG("RLT_FRAME_RATE_V1 run_id=%s stage=producer outcome=produced first_seq=%zu last_seq=%zu interval_count=%llu elapsed_ns=%llu end_monotonic_ns=%llu produced_fps=%.3f\n",
@@ -754,6 +792,8 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_swapBuffers(JNIEnv *en
 
 		/* Reset per-window counters. */
 		ctx->perf.mkcur_count_window = 0;
+		ctx->perf.marker_count_window = 0;
+		ctx->perf.marker_error_count_window = 0;
 		ctx->perf.gpu_valid_count = 0;
 		ctx->perf.producer_interval_ns_sum = 0;
 		ctx->perf.producer_interval_count = 0;

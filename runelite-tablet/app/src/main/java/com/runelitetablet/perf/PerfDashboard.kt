@@ -26,9 +26,14 @@ class PerfDashboard(
         val producedFps: Double?,
         val producedFpsStatus: String,
         val producerLastSeq: Long?,
+        val submittedFps: Double?,
+        val presentedFps: Double?,
+        val presentationStatus: String,
         val xlorieConsumerRedrawRateHz: Double?,
         val x11GlxSwapRequestRateHz: Double?,
         val x11DamageRequestRateHz: Double?,
+        val x11ProducerMarkerRateHz: Double?,
+        val producerMarkerErrorCount: Long?,
         val xlorieSubmittedRateHz: Double?,
         val displayPresentEventRateHz: Double?,
         val uniqueSourceSubmitRateHz: Double?,
@@ -47,6 +52,8 @@ class PerfDashboard(
     @Volatile private var lastConsumerRedrawRateHz: Double? = null
     @Volatile private var lastX11GlxSwapRequestRateHz: Double? = null
     @Volatile private var lastX11DamageRequestRateHz: Double? = null
+    @Volatile private var lastX11ProducerMarkerRateHz: Double? = null
+    @Volatile private var lastProducerMarkerErrorCount: Long? = null
     @Volatile private var lastXlorieSubmittedRateHz: Double? = null
     @Volatile private var lastDisplayPresentEventRateHz: Double? = null
     @Volatile private var lastUniqueSourceSubmitRateHz: Double? = null
@@ -54,6 +61,8 @@ class PerfDashboard(
     @Volatile private var lastDuplicateSourceSubmitCount: Long? = null
     @Volatile private var lastDuplicateSourcePresentCount: Long? = null
     @Volatile private var lastPresentationCapability: String = "unavailable"
+    @Volatile private var lastPresentationSourceIdentity: String = "unavailable"
+    @Volatile private var lastPresentationRunId: String = "unknown"
     @Volatile private var lastX11UploadCallRateHz: Double? = null
     @Volatile private var lastX11UploadBytes: Long? = null
     @Volatile private var lastX11UploadCopyMs: Double? = null
@@ -78,6 +87,8 @@ class PerfDashboard(
     fun updateX11StageRates(stats: X11StageRates) {
         lastX11GlxSwapRequestRateHz = stats.glxSwapRequestRateHz
         lastX11DamageRequestRateHz = stats.damageRequestRateHz
+        lastX11ProducerMarkerRateHz = stats.producerMarkerRateHz
+        lastProducerMarkerErrorCount = stats.producerMarkerErrorCount
     }
 
     fun updatePresentationStats(stats: PresentationStats) {
@@ -88,6 +99,8 @@ class PerfDashboard(
         lastDuplicateSourceSubmitCount = stats.duplicateSourceSubmitCount
         lastDuplicateSourcePresentCount = stats.duplicateSourcePresentCount
         lastPresentationCapability = stats.capability
+        lastPresentationSourceIdentity = stats.sourceIdentity
+        lastPresentationRunId = stats.runId
     }
 
     fun updateCopyStats(stats: CopyStats) {
@@ -104,6 +117,8 @@ class PerfDashboard(
         lastConsumerRedrawRateHz = null
         lastX11GlxSwapRequestRateHz = null
         lastX11DamageRequestRateHz = null
+        lastX11ProducerMarkerRateHz = null
+        lastProducerMarkerErrorCount = null
         lastXlorieSubmittedRateHz = null
         lastDisplayPresentEventRateHz = null
         lastUniqueSourceSubmitRateHz = null
@@ -111,6 +126,8 @@ class PerfDashboard(
         lastDuplicateSourceSubmitCount = null
         lastDuplicateSourcePresentCount = null
         lastPresentationCapability = "unavailable"
+        lastPresentationSourceIdentity = "unavailable"
+        lastPresentationRunId = "unknown"
         lastX11UploadCallRateHz = null
         lastX11UploadBytes = null
         lastX11UploadCopyMs = null
@@ -143,6 +160,21 @@ class PerfDashboard(
         val affinities = affinityMonitor.sample(pids)
         val overheads = ptraceEstimator.sample(pids)
         val producer = producerRateTracker.snapshot(monotonicNowNs())
+        val presentationCorrelated =
+            producer.runId != null &&
+                producer.runId == lastPresentationRunId &&
+                lastPresentationCapability == "supported" &&
+                lastPresentationSourceIdentity == "producer_seq"
+        val submittedFps =
+            if (presentationCorrelated) lastUniqueSourceSubmitRateHz else null
+        val presentedFps =
+            if (presentationCorrelated) lastUniqueSourcePresentRateHz else null
+        val presentationStatus =
+            if (presentationCorrelated) {
+                "valid_producer_sequence_correlated"
+            } else {
+                "unavailable_no_correlated_presentation_events"
+            }
 
         val summary = Summary(
             affinities,
@@ -150,9 +182,14 @@ class PerfDashboard(
             producer.producedFps,
             producer.status,
             producer.lastSeq,
+            submittedFps,
+            presentedFps,
+            presentationStatus,
             lastConsumerRedrawRateHz,
             lastX11GlxSwapRequestRateHz,
             lastX11DamageRequestRateHz,
+            lastX11ProducerMarkerRateHz,
+            lastProducerMarkerErrorCount,
             lastXlorieSubmittedRateHz,
             lastDisplayPresentEventRateHz,
             lastUniqueSourceSubmitRateHz,
@@ -192,16 +229,21 @@ class PerfDashboard(
             summary.x11UploadCopyMs?.let { "%.3f".format(Locale.ROOT, it) } ?: "unavailable"
         val duplicateSubmitCount = summary.duplicateSourceSubmitCount?.toString() ?: "unavailable"
         val duplicatePresentCount = summary.duplicateSourcePresentCount?.toString() ?: "unavailable"
+        val markerErrorCount = summary.producerMarkerErrorCount?.toString() ?: "unavailable"
         logger.perf(
             "PERF_SUMMARY: $affinityParts $overheadParts" +
                 " produced_fps=$producedValue" +
                 " produced_fps_status=${summary.producedFpsStatus}" +
                 " producer_last_seq=$producerLastSeq" +
-                " accepted_fps=unavailable submitted_fps=unavailable presented_fps=unavailable" +
-                " presentation_status=unavailable_no_correlated_presentation_events" +
+                " accepted_fps=unavailable" +
+                " submitted_fps=${rate(summary.submittedFps)}" +
+                " presented_fps=${rate(summary.presentedFps)}" +
+                " presentation_status=${summary.presentationStatus}" +
                 " xlorie_consumer_redraw_rate_hz=$consumerRate" +
                 " x11_glx_swap_request_rate_hz=${rate(summary.x11GlxSwapRequestRateHz)}" +
                 " x11_damage_request_rate_hz=${rate(summary.x11DamageRequestRateHz)}" +
+                " x11_producer_marker_rate_hz=${rate(summary.x11ProducerMarkerRateHz)}" +
+                " producer_marker_error_count=$markerErrorCount" +
                 " xlorie_submitted_rate_hz=${rate(summary.xlorieSubmittedRateHz)}" +
                 " display_present_event_rate_hz=${rate(summary.displayPresentEventRateHz)}" +
                 " unique_source_submit_rate_hz=${rate(summary.uniqueSourceSubmitRateHz)}" +
@@ -242,7 +284,11 @@ class PerfDashboard(
                 extractField(line, "x11_glx_swap_request_rate_hz")?.toDoubleOrNull() ?: return null
             val damageRate =
                 extractField(line, "x11_damage_request_rate_hz")?.toDoubleOrNull() ?: return null
-            return X11StageRates(glxRate, damageRate)
+            val markerRate =
+                extractField(line, "x11_producer_marker_rate_hz")?.toDoubleOrNull()
+            val markerErrors =
+                extractField(line, "producer_marker_error_count")?.toLongOrNull()
+            return X11StageRates(glxRate, damageRate, markerRate, markerErrors)
         }
 
         fun parseXloriePresentationLine(line: String): PresentationStats? {
@@ -260,6 +306,9 @@ class PerfDashboard(
                 extractField(line, "duplicate_source_submit_count")?.toLongOrNull() ?: return null
             val duplicatePresentCount =
                 extractField(line, "duplicate_source_present_count")?.toLongOrNull() ?: return null
+            val sourceIdentity =
+                extractField(line, "source_identity") ?: "x11_source_ordinal"
+            val runId = extractField(line, "run_id") ?: "unknown"
             return PresentationStats(
                 capability,
                 submittedRate,
@@ -267,7 +316,9 @@ class PerfDashboard(
                 uniqueSubmitRate,
                 uniquePresentRate,
                 duplicateSubmitCount,
-                duplicatePresentCount
+                duplicatePresentCount,
+                sourceIdentity,
+                runId
             )
         }
 
@@ -310,7 +361,9 @@ class PerfDashboard(
 
     data class X11StageRates(
         val glxSwapRequestRateHz: Double,
-        val damageRequestRateHz: Double
+        val damageRequestRateHz: Double,
+        val producerMarkerRateHz: Double? = null,
+        val producerMarkerErrorCount: Long? = null
     )
 
     data class PresentationStats(
@@ -320,7 +373,9 @@ class PerfDashboard(
         val uniqueSourceSubmitRateHz: Double,
         val uniqueSourcePresentRateHz: Double,
         val duplicateSourceSubmitCount: Long,
-        val duplicateSourcePresentCount: Long
+        val duplicateSourcePresentCount: Long,
+        val sourceIdentity: String = "x11_source_ordinal",
+        val runId: String = "unknown"
     )
 
     data class CopyStats(

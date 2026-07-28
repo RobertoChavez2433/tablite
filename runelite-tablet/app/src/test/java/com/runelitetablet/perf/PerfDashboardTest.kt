@@ -149,6 +149,44 @@ class PerfDashboardTest {
     }
 
     @Test
+    fun `producer sequence identity enables canonical submitted and presented FPS`() {
+        val now = System.nanoTime()
+        dashboard.updateProducerStats(
+            ProducerRateTracker.Sample(
+                runId = "11111111-1111-1111-1111-111111111111",
+                firstSeq = 90,
+                lastSeq = 120,
+                intervalCount = 30,
+                elapsedNs = 1_500_000_000,
+                endMonotonicNs = now,
+                reportedProducedFps = 20.0
+            )
+        )
+        dashboard.updatePresentationStats(
+            PerfDashboard.PresentationStats(
+                capability = "supported",
+                submittedRateHz = 20.0,
+                displayPresentEventRateHz = 19.9,
+                uniqueSourceSubmitRateHz = 19.8,
+                uniqueSourcePresentRateHz = 19.7,
+                duplicateSourceSubmitCount = 0,
+                duplicateSourcePresentCount = 0,
+                sourceIdentity = "producer_seq",
+                runId = "11111111-1111-1111-1111-111111111111"
+            )
+        )
+
+        val summary = dashboard.collect(emptyList())
+
+        assertEquals(19.8, summary.submittedFps!!, 0.01)
+        assertEquals(19.7, summary.presentedFps!!, 0.01)
+        assertEquals("valid_producer_sequence_correlated", summary.presentationStatus)
+        val log = logger.entriesWithTag("PERF").last().message
+        assertTrue(log.contains("submitted_fps=19.800"))
+        assertTrue(log.contains("presented_fps=19.700"))
+    }
+
+    @Test
     fun `parses cross process X server snapshot mirrored by renderer`() {
         val line = "XlorieServerSnapshotV1: generation=2 window_ms=5000 " +
             "x11_damage_request_rate_hz=22.0 x11_glx_swap_request_rate_hz=0.0 " +

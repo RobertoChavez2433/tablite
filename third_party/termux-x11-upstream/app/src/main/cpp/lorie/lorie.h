@@ -181,10 +181,16 @@ struct lorie_shared_server_state {
      */
     volatile uint64_t acceptedFrameOrdinal __attribute__((aligned(8)));
     volatile uint64_t acceptedMonotonicNs __attribute__((aligned(8)));
+    volatile uint64_t producerMarkerFrameSeq __attribute__((aligned(8)));
+    volatile uint64_t producerMarkerSendMonotonicNs __attribute__((aligned(8)));
+    volatile uint64_t producerMarkerReceiveMonotonicNs __attribute__((aligned(8)));
     volatile uint64_t damageFrameOrdinal __attribute__((aligned(8)));
     volatile uint64_t damageAcceptedMonotonicNs __attribute__((aligned(8)));
+    volatile uint64_t damageProducerMarkerSendMonotonicNs __attribute__((aligned(8)));
+    volatile uint64_t damageProducerMarkerReceiveMonotonicNs __attribute__((aligned(8)));
     volatile uint64_t damageMonotonicNs __attribute__((aligned(8)));
     volatile uint8_t damageOrdinalSource;
+    char captureId[37];
 
     /*
      * Five-second X-server aggregate snapshot. telemetryGeneration is a
@@ -194,8 +200,12 @@ struct lorie_shared_server_state {
     volatile uint32_t telemetryWindowMs;
     volatile uint32_t telemetryDamageRequests;
     volatile uint32_t telemetryGlxSwapRequests;
+    volatile uint32_t telemetryProducerMarkers;
+    volatile uint32_t telemetryProducerMarkerErrors;
     volatile uint64_t telemetryFirstGlxOrdinal __attribute__((aligned(8)));
     volatile uint64_t telemetryLastGlxOrdinal __attribute__((aligned(8)));
+    volatile uint64_t telemetryFirstProducerSeq __attribute__((aligned(8)));
+    volatile uint64_t telemetryLastProducerSeq __attribute__((aligned(8)));
     volatile uint64_t telemetryUploadCalls __attribute__((aligned(8)));
     volatile uint64_t telemetryUploadBytes __attribute__((aligned(8)));
     volatile uint64_t telemetryUploadPixels __attribute__((aligned(8)));

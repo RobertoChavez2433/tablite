@@ -9,6 +9,31 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+internal data class ScriptBatchTransport(
+    val arguments: Array<String>,
+    val stdin: String
+)
+
+internal fun buildScriptBatchTransport(
+    scriptsDir: String,
+    scripts: List<Pair<String, String>>
+): ScriptBatchTransport {
+    val program = buildString {
+        append("mkdir -p ").append(scriptsDir).append(" && ")
+        for ((name, content) in scripts) {
+            val encoded = java.util.Base64.getEncoder()
+                .encodeToString(content.toByteArray(Charsets.UTF_8))
+            append("echo '").append(encoded).append("' | base64 -d > ")
+                .append(scriptsDir).append("/").append(name).append(" && ")
+        }
+        append("chmod +x")
+        for ((name, _) in scripts) {
+            append(" ").append(scriptsDir).append("/").append(name)
+        }
+    }
+    return ScriptBatchTransport(arguments = arrayOf("-s"), stdin = program)
+}
+
 class ScriptManager(
     private val context: Context,
     private val commandRunner: CommandRunner,
@@ -145,8 +170,12 @@ class ScriptManager(
     }
 
     /**
-     * Deploy all scripts in a single Termux IPC call. Builds a shell script that writes
-     * each file using heredoc syntax, then chmod +x all at once.
+     * Deploy all scripts in a single Termux IPC call.
+     *
+     * The generated program is passed on stdin to `bash -s`, not as the argument to
+     * `bash -c`. Android's process launcher rejects a large command argument with E2BIG
+     * before bash starts; the current script set is already large enough to cross that
+     * boundary once its contents are base64 encoded.
      */
     private suspend fun deployScriptsBatched(scriptNames: List<String>): Boolean {
         val startMs = System.currentTimeMillis()
@@ -162,28 +191,19 @@ class ScriptManager(
             name to content
         }
 
-        // Build a single shell command that writes all scripts
-        val sb = StringBuilder()
-        sb.append("mkdir -p $SCRIPTS_DIR && ")
-        for ((name, content) in scripts) {
-            // Use base64 to avoid heredoc delimiter collisions with script content
-            val encoded = android.util.Base64.encodeToString(
-                content.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP
-            )
-            sb.append("echo '$encoded' | base64 -d > $SCRIPTS_DIR/$name && ")
-        }
-        sb.append("chmod +x")
-        for ((name, _) in scripts) {
-            sb.append(" $SCRIPTS_DIR/$name")
-        }
+        val transport = buildScriptBatchTransport(SCRIPTS_DIR, scripts)
 
         val totalBytes = scripts.sumOf { it.second.length }
-        AppLog.script("deployScriptsBatched: ${scripts.size} scripts, ${totalBytes} bytes total")
+        AppLog.script(
+            "deployScriptsBatched: ${scripts.size} scripts, $totalBytes bytes total, " +
+                "${transport.stdin.length} bytes over stdin"
+        )
 
         val result = commandRunner.execute(
             commandPath = "${CommandRunner.TERMUX_BIN_PATH}/bash",
-            arguments = arrayOf("-c", sb.toString()),
+            arguments = transport.arguments,
             background = true,
+            stdin = transport.stdin,
             timeoutMs = CommandRunner.TIMEOUT_VERIFY_MS
         )
         val durationMs = System.currentTimeMillis() - startMs

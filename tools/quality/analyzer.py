@@ -469,6 +469,8 @@ def check_frame_handoff_contract(root: Path) -> list[Diagnostic]:
             "unique_source_present_rate_hz",
             "duplicate_source_presentations",
             "source_ordinal_gaps",
+            "rlawt_swap_window_summary",
+            "unavailable_no_per_frame_intervals",
         ),
     }
     diagnostics: list[Diagnostic] = []
@@ -492,6 +494,106 @@ def check_frame_handoff_contract(root: Path) -> list[Diagnostic]:
     return diagnostics
 
 
+def check_producer_presentation_identity(root: Path) -> list[Diagnostic]:
+    contracts = {
+        Path("third_party/rlawt/rlawt_nix.c"): (
+            "_RLT_FRAME_SEQ_V1",
+            "XChangeProperty(",
+        ),
+        Path("third_party/termux-x11-upstream/app/src/main/cpp/lorie/InitOutput.c"): (
+            "_RLT_FRAME_SEQ_V1",
+            "PropertyStateCallback",
+            "producerMarkerSeq",
+        ),
+        Path("third_party/termux-x11-upstream/app/src/main/cpp/lorie/renderer.c"): (
+            "source_identity=%s",
+            "run_id=%s",
+            "first_presented_producer_seq=",
+            "last_presented_producer_seq=",
+            "presented_fps=",
+            "presented_fps_status=",
+        ),
+        Path(
+            "runelite-tablet/app/src/main/java/com/runelitetablet/perf/PerfDashboard.kt"
+        ): (
+            'lastPresentationSourceIdentity == "producer_seq"',
+            "producer.runId == lastPresentationRunId",
+            "valid_producer_sequence_correlated",
+        ),
+        Path("scripts/analyze-frame-capture.ps1"): (
+            "valid_producer_sequence_correlated_display_timestamps",
+            '$presentationSourceIdentities | Where-Object { $_ -ne "producer_seq" }',
+            "$presentationRunIds | Where-Object { $_ -ne $captureId }",
+        ),
+    }
+    diagnostics: list[Diagnostic] = []
+    for relative, markers in contracts.items():
+        path = root / relative
+        if not path.exists():
+            continue
+        source = _read(path)
+        for marker in markers:
+            if marker not in source:
+                diagnostics.append(
+                    _line_diagnostic(
+                        root,
+                        path,
+                        1,
+                        "TBL013",
+                        "producer_presentation_identity",
+                        (
+                            "Canonical submitted/presented FPS requires producer identity; "
+                            f"marker '{marker}' is missing."
+                        ),
+                    )
+                )
+    return diagnostics
+
+
+def check_script_batch_transport(root: Path) -> list[Diagnostic]:
+    path = (
+        root
+        / "runelite-tablet/app/src/main/java/com/runelitetablet/setup/ScriptManager.kt"
+    )
+    if not path.exists():
+        return []
+    source = _read(path)
+    required = (
+        'arguments = arrayOf("-s")',
+        "stdin = program",
+        "arguments = transport.arguments",
+        "stdin = transport.stdin",
+    )
+    diagnostics: list[Diagnostic] = []
+    for marker in required:
+        if marker not in source:
+            diagnostics.append(
+                _line_diagnostic(
+                    root,
+                    path,
+                    1,
+                    "TBL014",
+                    "script_batch_transport",
+                    (
+                        "Batched deployment must stream its generated program to bash stdin; "
+                        f"marker '{marker}' is missing."
+                    ),
+                )
+            )
+    if 'arguments = arrayOf("-c", program)' in source:
+        diagnostics.append(
+            _line_diagnostic(
+                root,
+                path,
+                1,
+                "TBL014",
+                "script_batch_transport",
+                "Large batched deployment programs may not be placed in process arguments.",
+            )
+        )
+    return diagnostics
+
+
 ARCHITECTURE_CHECKS = (
     check_domain_purity,
     check_ui_boundaries,
@@ -504,6 +606,8 @@ ARCHITECTURE_CHECKS = (
     check_telemetry_hot_path,
     check_capture_lifecycle_ownership,
     check_frame_handoff_contract,
+    check_producer_presentation_identity,
+    check_script_batch_transport,
 )
 ARCHITECTURE_RULE_BUDGET_MS = 1_000.0
 ARCHITECTURE_TOTAL_BUDGET_MS = 5_000.0
