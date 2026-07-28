@@ -174,6 +174,34 @@ struct lorie_shared_server_state {
     /* ID of root window texture to be drawn. */
     uint64_t rootWindowTextureID;
 
+    /*
+     * Monotonic X11 handoff identity. The GLX hook assigns acceptedFrameOrdinal;
+     * the damage path snapshots it into damageFrameOrdinal before waking the
+     * renderer. These are observability-only and never affect rendering.
+     */
+    volatile uint64_t acceptedFrameOrdinal __attribute__((aligned(8)));
+    volatile uint64_t acceptedMonotonicNs __attribute__((aligned(8)));
+    volatile uint64_t damageFrameOrdinal __attribute__((aligned(8)));
+    volatile uint64_t damageAcceptedMonotonicNs __attribute__((aligned(8)));
+    volatile uint64_t damageMonotonicNs __attribute__((aligned(8)));
+    volatile uint8_t damageOrdinalSource;
+
+    /*
+     * Five-second X-server aggregate snapshot. telemetryGeneration is a
+     * seqlock: odd while the server writes, even when the renderer may copy.
+     */
+    volatile uint32_t telemetryGeneration __attribute__((aligned(4)));
+    volatile uint32_t telemetryWindowMs;
+    volatile uint32_t telemetryDamageRequests;
+    volatile uint32_t telemetryGlxSwapRequests;
+    volatile uint64_t telemetryFirstGlxOrdinal __attribute__((aligned(8)));
+    volatile uint64_t telemetryLastGlxOrdinal __attribute__((aligned(8)));
+    volatile uint64_t telemetryUploadCalls __attribute__((aligned(8)));
+    volatile uint64_t telemetryUploadBytes __attribute__((aligned(8)));
+    volatile uint64_t telemetryUploadPixels __attribute__((aligned(8)));
+    volatile uint64_t telemetryUploadCopyNs __attribute__((aligned(8)));
+    volatile uint64_t telemetryUploadCopyMaxNs __attribute__((aligned(8)));
+
     /* A signal to renderer to update root window texture content from shared fragment if needed */
     volatile uint8_t drawRequested;
 

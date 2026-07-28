@@ -147,12 +147,54 @@ if ($null -ne $launcherContext) {
 }
 
 $xlorieConsumerRedrawRateHzValues = New-Object System.Collections.Generic.List[double]
+$x11GlxSwapRequestRateHzValues = New-Object System.Collections.Generic.List[double]
+$x11DamageRequestRateHzValues = New-Object System.Collections.Generic.List[double]
+$x11UploadCallRateHzValues = New-Object System.Collections.Generic.List[double]
+$x11UploadBytesValues = New-Object System.Collections.Generic.List[long]
+$x11UploadCopyNsValues = New-Object System.Collections.Generic.List[long]
+$x11UploadCopyMaxNsValues = New-Object System.Collections.Generic.List[long]
+$xlorieSubmittedRateHzValues = New-Object System.Collections.Generic.List[double]
+$displayPresentEventRateHzValues = New-Object System.Collections.Generic.List[double]
+$uniqueSourceSubmitRateHzValues = New-Object System.Collections.Generic.List[double]
+$uniqueSourcePresentRateHzValues = New-Object System.Collections.Generic.List[double]
+$presentationCapabilities = New-Object System.Collections.Generic.List[string]
+$presentationSubmittedCounts = New-Object System.Collections.Generic.List[long]
+$presentationPresentedCounts = New-Object System.Collections.Generic.List[long]
+$presentationUniqueSubmitCounts = New-Object System.Collections.Generic.List[long]
+$presentationDuplicateSubmitCounts = New-Object System.Collections.Generic.List[long]
+$presentationMissingSubmitCounts = New-Object System.Collections.Generic.List[long]
+$presentationUniquePresentCounts = New-Object System.Collections.Generic.List[long]
+$presentationDuplicatePresentCounts = New-Object System.Collections.Generic.List[long]
+$presentationMissingPresentCounts = New-Object System.Collections.Generic.List[long]
+$presentationInvalidCounts = New-Object System.Collections.Generic.List[long]
+$presentationQueryErrorCounts = New-Object System.Collections.Generic.List[long]
+$presentationLostCounts = New-Object System.Collections.Generic.List[long]
+$sourceOrdinalGapCounts = New-Object System.Collections.Generic.List[long]
+$sourceOrdinalDuplicateCounts = New-Object System.Collections.Generic.List[long]
+$sourceOrdinalMissingCounts = New-Object System.Collections.Generic.List[long]
+$contentRequestCounts = New-Object System.Collections.Generic.List[long]
+$cursorMoveRequestCounts = New-Object System.Collections.Generic.List[long]
+$cursorUpdateRequestCounts = New-Object System.Collections.Generic.List[long]
+$contentOnlyRedrawCounts = New-Object System.Collections.Generic.List[long]
+$cursorOnlyRedrawCounts = New-Object System.Collections.Generic.List[long]
+$mixedReasonRedrawCounts = New-Object System.Collections.Generic.List[long]
+$unclassifiedRedrawCounts = New-Object System.Collections.Generic.List[long]
+$acceptedToDamageMsValues = New-Object System.Collections.Generic.List[double]
+$damageToRedrawMsValues = New-Object System.Collections.Generic.List[double]
+$acceptedToDamageStatuses = New-Object System.Collections.Generic.List[string]
 $producerWindowsByKey = @{}
 $producerWindowInvalidCount = 0
 $producerWindowDuplicateCount = 0
 $boundedProducerLog = Get-ChildItem -LiteralPath $capturePath -Recurse -File -Filter "runelite-native-capture-window.log" |
     Select-Object -First 1
-Get-ChildItem -LiteralPath $capturePath -Recurse -File -Include "*.log","*.txt" | ForEach-Object {
+$telemetryLogFiles = @(
+    Get-ChildItem -LiteralPath $capturePath -Recurse -File -Include "*.log","*.txt"
+)
+$hasMirroredServerSnapshots = @(
+    $telemetryLogFiles |
+        Select-String -Pattern "XlorieServerSnapshotV1:" -List -ErrorAction SilentlyContinue
+).Count -gt 0
+$telemetryLogFiles | ForEach-Object {
     $currentLog = $_
     $isProducerWindowSource = ($null -eq $boundedProducerLog) -or
         ($currentLog.FullName -eq $boundedProducerLog.FullName)
@@ -162,6 +204,118 @@ Get-ChildItem -LiteralPath $capturePath -Recurse -File -Include "*.log","*.txt" 
                 $Matches[1],
                 [System.Globalization.CultureInfo]::InvariantCulture
             ))
+        }
+        $isSelectedServerSnapshot =
+            ($hasMirroredServerSnapshots -and $_ -match "XlorieServerSnapshotV1:") -or
+            (-not $hasMirroredServerSnapshots -and $_ -match "XlorieStageRatesV1:")
+        if ($isSelectedServerSnapshot) {
+            if ($_ -match "x11_glx_swap_request_rate_hz=([0-9]+(?:\.[0-9]+)?)") {
+                $x11GlxSwapRequestRateHzValues.Add(
+                    [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture))
+            }
+            if ($_ -match "x11_damage_request_rate_hz=([0-9]+(?:\.[0-9]+)?)") {
+                $x11DamageRequestRateHzValues.Add(
+                    [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture))
+            }
+        }
+        if (
+            ($hasMirroredServerSnapshots -and $_ -match "XlorieServerSnapshotV1:") -or
+            (-not $hasMirroredServerSnapshots -and $_ -match "XlorieCopyStatsV1:")
+        ) {
+            if ($_ -match "upload_call_rate_hz=([0-9]+(?:\.[0-9]+)?)") {
+                $x11UploadCallRateHzValues.Add(
+                    [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture))
+            }
+            if ($_ -match "upload_bytes=([0-9]+)") {
+                $x11UploadBytesValues.Add([long]$Matches[1])
+            }
+            if ($_ -match "upload_copy_ns=([0-9]+)") {
+                $x11UploadCopyNsValues.Add([long]$Matches[1])
+            }
+            if ($_ -match "upload_copy_max_ns=([0-9]+)") {
+                $x11UploadCopyMaxNsValues.Add([long]$Matches[1])
+            }
+        }
+        if ($_ -match "XloriePresentationV1:") {
+            if ($_ -match "capability=([a-z_]+)") {
+                $presentationCapabilities.Add($Matches[1])
+            }
+            if ($_ -match "xlorie_submitted_rate_hz=([0-9]+(?:\.[0-9]+)?)") {
+                $xlorieSubmittedRateHzValues.Add(
+                    [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture))
+            }
+            if ($_ -match "display_present_event_rate_hz=([0-9]+(?:\.[0-9]+)?)") {
+                $displayPresentEventRateHzValues.Add(
+                    [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture))
+            }
+            if ($_ -match "unique_source_submit_rate_hz=([0-9]+(?:\.[0-9]+)?)") {
+                $uniqueSourceSubmitRateHzValues.Add(
+                    [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture))
+            }
+            if ($_ -match "unique_source_present_rate_hz=([0-9]+(?:\.[0-9]+)?)") {
+                $uniqueSourcePresentRateHzValues.Add(
+                    [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture))
+            }
+            foreach ($field in @(
+                @{ Name = "submitted_count"; Target = $presentationSubmittedCounts },
+                @{ Name = "presented_count"; Target = $presentationPresentedCounts },
+                @{ Name = "unique_source_submit_count"; Target = $presentationUniqueSubmitCounts },
+                @{ Name = "duplicate_source_submit_count"; Target = $presentationDuplicateSubmitCounts },
+                @{ Name = "missing_source_submit_count"; Target = $presentationMissingSubmitCounts },
+                @{ Name = "unique_source_present_count"; Target = $presentationUniquePresentCounts },
+                @{ Name = "duplicate_source_present_count"; Target = $presentationDuplicatePresentCounts },
+                @{ Name = "missing_source_present_count"; Target = $presentationMissingPresentCounts },
+                @{ Name = "invalid_timestamp_count"; Target = $presentationInvalidCounts },
+                @{ Name = "query_error_count"; Target = $presentationQueryErrorCounts },
+                @{ Name = "telemetry_lost_count"; Target = $presentationLostCounts }
+            )) {
+                if ($_ -match "$($field.Name)=([0-9]+)") {
+                    $field.Target.Add([long]$Matches[1])
+                }
+            }
+        }
+        if ($_ -match "XlorieHandoffV1:") {
+            foreach ($field in @(
+                @{ Name = "source_ordinal_gap_count"; Target = $sourceOrdinalGapCounts },
+                @{ Name = "source_ordinal_duplicate_count"; Target = $sourceOrdinalDuplicateCounts },
+                @{ Name = "source_ordinal_missing_count"; Target = $sourceOrdinalMissingCounts },
+                @{ Name = "content_request_count"; Target = $contentRequestCounts },
+                @{ Name = "cursor_move_request_count"; Target = $cursorMoveRequestCounts },
+                @{ Name = "cursor_update_request_count"; Target = $cursorUpdateRequestCounts },
+                @{ Name = "content_only_redraw_count"; Target = $contentOnlyRedrawCounts },
+                @{ Name = "cursor_only_redraw_count"; Target = $cursorOnlyRedrawCounts },
+                @{ Name = "mixed_reason_redraw_count"; Target = $mixedReasonRedrawCounts },
+                @{ Name = "unclassified_redraw_count"; Target = $unclassifiedRedrawCounts }
+            )) {
+                if ($_ -match "$($field.Name)=([0-9]+)") {
+                    $field.Target.Add([long]$Matches[1])
+                }
+            }
+            if ($_ -match "accepted_to_damage_status=([a-z_]+)") {
+                $acceptedToDamageStatuses.Add($Matches[1])
+            }
+            $acceptedSampleCount = 0
+            if ($_ -match "accepted_to_damage_sample_count=([0-9]+)") {
+                $acceptedSampleCount = [long]$Matches[1]
+            }
+            if (
+                $acceptedSampleCount -gt 0 -and
+                $_ -match "avg_accepted_to_damage_ms=([0-9]+(?:\.[0-9]+)?)"
+            ) {
+                $acceptedToDamageMsValues.Add(
+                    [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture))
+            }
+            $damageSampleCount = 0
+            if ($_ -match "damage_to_redraw_sample_count=([0-9]+)") {
+                $damageSampleCount = [long]$Matches[1]
+            }
+            if (
+                $damageSampleCount -gt 0 -and
+                $_ -match "avg_damage_to_redraw_ms=([0-9]+(?:\.[0-9]+)?)"
+            ) {
+                $damageToRedrawMsValues.Add(
+                    [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture))
+            }
         }
         if ($isProducerWindowSource -and $_ -match "RLT_FRAME_RATE_V1\s+run_id=([^\s]+)\s+stage=producer\s+outcome=produced\s+first_seq=([0-9]+)\s+last_seq=([0-9]+)\s+interval_count=([0-9]+)\s+elapsed_ns=([0-9]+)\s+end_monotonic_ns=([0-9]+)\s+produced_fps=([0-9]+(?:\.[0-9]+)?)") {
             $windowRunId = $Matches[1]
@@ -233,6 +387,27 @@ $summary = [ordered]@{
         xlorie_consumer_redraw_rate_hz = if ($xlorieConsumerRedrawRateHzValues.Count -gt 0) {
             ($xlorieConsumerRedrawRateHzValues | Measure-Object -Average).Average
         } else { $null }
+        x11_glx_swap_request_rate_hz = if ($x11GlxSwapRequestRateHzValues.Count -gt 0) {
+            ($x11GlxSwapRequestRateHzValues | Measure-Object -Average).Average
+        } else { $null }
+        x11_damage_request_rate_hz = if ($x11DamageRequestRateHzValues.Count -gt 0) {
+            ($x11DamageRequestRateHzValues | Measure-Object -Average).Average
+        } else { $null }
+        xlorie_submitted_rate_hz = if ($xlorieSubmittedRateHzValues.Count -gt 0) {
+            ($xlorieSubmittedRateHzValues | Measure-Object -Average).Average
+        } else { $null }
+        display_present_event_rate_hz = if ($displayPresentEventRateHzValues.Count -gt 0) {
+            ($displayPresentEventRateHzValues | Measure-Object -Average).Average
+        } else { $null }
+        unique_source_submit_rate_hz = if ($uniqueSourceSubmitRateHzValues.Count -gt 0) {
+            ($uniqueSourceSubmitRateHzValues | Measure-Object -Average).Average
+        } else { $null }
+        unique_source_present_rate_hz = if ($uniqueSourcePresentRateHzValues.Count -gt 0) {
+            ($uniqueSourcePresentRateHzValues | Measure-Object -Average).Average
+        } else { $null }
+        x11_upload_call_rate_hz = if ($x11UploadCallRateHzValues.Count -gt 0) {
+            ($x11UploadCallRateHzValues | Measure-Object -Average).Average
+        } else { $null }
     }
     rate_validity = [ordered]@{
         produced_fps = [ordered]@{
@@ -250,6 +425,117 @@ $summary = [ordered]@{
         xlorie_consumer_redraw_rate_hz = [ordered]@{
             status = if ($xlorieConsumerRedrawRateHzValues.Count -gt 0) { "valid_diagnostic_rate_only" } else { "unavailable" }
         }
+        x11_glx_swap_request_rate_hz = [ordered]@{
+            status = if ($x11GlxSwapRequestRateHzValues.Count -gt 0) { "valid_diagnostic_rate_only" } else { "unavailable" }
+        }
+        x11_damage_request_rate_hz = [ordered]@{
+            status = if ($x11DamageRequestRateHzValues.Count -gt 0) { "valid_diagnostic_rate_only" } else { "unavailable" }
+        }
+        xlorie_submitted_rate_hz = [ordered]@{
+            status = if ($xlorieSubmittedRateHzValues.Count -gt 0) { "valid_diagnostic_rate_only" } else { "unavailable" }
+        }
+        display_present_event_rate_hz = [ordered]@{
+            status = if ($displayPresentEventRateHzValues.Count -gt 0) {
+                "valid_display_event_rate_unmatched_to_producer"
+            } else { "unavailable" }
+        }
+        unique_source_submit_rate_hz = [ordered]@{
+            status = if ($uniqueSourceSubmitRateHzValues.Count -gt 0) {
+                "valid_x11_source_ordinal_rate_not_producer_correlated"
+            } else { "unavailable" }
+        }
+        unique_source_present_rate_hz = [ordered]@{
+            status = if ($uniqueSourcePresentRateHzValues.Count -gt 0) {
+                "valid_x11_source_ordinal_rate_not_producer_correlated"
+            } else { "unavailable" }
+        }
+    }
+    x11_copy = [ordered]@{
+        sample_windows = $x11UploadBytesValues.Count
+        upload_bytes = if ($x11UploadBytesValues.Count -gt 0) {
+            ($x11UploadBytesValues | Measure-Object -Sum).Sum
+        } else { 0 }
+        upload_copy_ms = if ($x11UploadCopyNsValues.Count -gt 0) {
+            (($x11UploadCopyNsValues | Measure-Object -Sum).Sum) / 1000000.0
+        } else { 0.0 }
+        upload_copy_max_ms = if ($x11UploadCopyMaxNsValues.Count -gt 0) {
+            (($x11UploadCopyMaxNsValues | Measure-Object -Maximum).Maximum) / 1000000.0
+        } else { 0.0 }
+    }
+    x11_handoff = [ordered]@{
+        source_ordinal_gaps = if ($sourceOrdinalGapCounts.Count -gt 0) {
+            ($sourceOrdinalGapCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        source_ordinal_duplicates = if ($sourceOrdinalDuplicateCounts.Count -gt 0) {
+            ($sourceOrdinalDuplicateCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        source_ordinal_missing = if ($sourceOrdinalMissingCounts.Count -gt 0) {
+            ($sourceOrdinalMissingCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        content_requests = if ($contentRequestCounts.Count -gt 0) {
+            ($contentRequestCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        cursor_move_requests = if ($cursorMoveRequestCounts.Count -gt 0) {
+            ($cursorMoveRequestCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        cursor_update_requests = if ($cursorUpdateRequestCounts.Count -gt 0) {
+            ($cursorUpdateRequestCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        content_only_redraws = if ($contentOnlyRedrawCounts.Count -gt 0) {
+            ($contentOnlyRedrawCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        cursor_only_redraws = if ($cursorOnlyRedrawCounts.Count -gt 0) {
+            ($cursorOnlyRedrawCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        mixed_reason_redraws = if ($mixedReasonRedrawCounts.Count -gt 0) {
+            ($mixedReasonRedrawCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        unclassified_redraws = if ($unclassifiedRedrawCounts.Count -gt 0) {
+            ($unclassifiedRedrawCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        accepted_to_damage_status = if ($acceptedToDamageStatuses.Count -gt 0) {
+            $acceptedToDamageStatuses[-1]
+        } else { "unavailable" }
+        accepted_to_damage_ms = Get-Stats @($acceptedToDamageMsValues)
+        damage_to_redraw_ms = Get-Stats @($damageToRedrawMsValues)
+    }
+    presentation = [ordered]@{
+        capability = if ($presentationCapabilities.Count -gt 0) {
+            $presentationCapabilities[-1]
+        } else { "unavailable" }
+        submitted_events = if ($presentationSubmittedCounts.Count -gt 0) {
+            ($presentationSubmittedCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        display_present_events = if ($presentationPresentedCounts.Count -gt 0) {
+            ($presentationPresentedCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        unique_source_submissions = if ($presentationUniqueSubmitCounts.Count -gt 0) {
+            ($presentationUniqueSubmitCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        duplicate_source_submissions = if ($presentationDuplicateSubmitCounts.Count -gt 0) {
+            ($presentationDuplicateSubmitCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        missing_source_submissions = if ($presentationMissingSubmitCounts.Count -gt 0) {
+            ($presentationMissingSubmitCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        unique_source_presentations = if ($presentationUniquePresentCounts.Count -gt 0) {
+            ($presentationUniquePresentCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        duplicate_source_presentations = if ($presentationDuplicatePresentCounts.Count -gt 0) {
+            ($presentationDuplicatePresentCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        missing_source_presentations = if ($presentationMissingPresentCounts.Count -gt 0) {
+            ($presentationMissingPresentCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        invalid_timestamps = if ($presentationInvalidCounts.Count -gt 0) {
+            ($presentationInvalidCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        query_errors = if ($presentationQueryErrorCounts.Count -gt 0) {
+            ($presentationQueryErrorCounts | Measure-Object -Sum).Sum
+        } else { 0 }
+        telemetry_lost = if ($presentationLostCounts.Count -gt 0) {
+            ($presentationLostCounts | Measure-Object -Sum).Sum
+        } else { 0 }
     }
     producer_interval_ms = Get-Stats @($producerIntervalsNs | ForEach-Object { $_ / 1000000.0 })
     frame_generation_ms = Get-Stats @($generationUs | ForEach-Object { $_ / 1000.0 })
@@ -262,7 +548,7 @@ $summary = [ordered]@{
         producer_frames = $rows.Count
         confidence_percent = 0.0
         exact_attribution_valid = $false
-        reason = "No actual presentation timestamps were available in the pulled frame events."
+        reason = "Display-present timestamps are source-ordinal classified but not joined to producer frame sequences."
     }
     bottleneck = [ordered]@{
         classification = "unknown"
@@ -273,7 +559,7 @@ $summary = [ordered]@{
         "accepted_fps",
         "submitted_fps",
         "presented_fps",
-        "actual presentation timestamps",
+        "producer-correlated presentation timestamps",
         "Mali counters unless an AGI artifact is added"
     )
 }
@@ -295,19 +581,27 @@ $report = @"
 
 - Target: $TargetHz Hz ($(Format-Value ($deadlineNs / 1000000.0) " ms"))
 - rlawt source rows: $($rows.Count); structured producer windows: $($producerWindows.Count)
-- Produced FPS: $(Format-Value $producedFps) (`$producedFpsStatus`)
+- Produced FPS: $(Format-Value $producedFps) ($producedFpsStatus)
 - Accepted FPS: unavailable
 - Submitted FPS: unavailable
 - Uniquely presented FPS: unavailable
 - Xlorie consumer redraw rate: $(Format-Value $(if ($xlorieConsumerRedrawRateHzValues.Count -gt 0) { ($xlorieConsumerRedrawRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — diagnostic only
+- X11 GLX swap request rate: $(Format-Value $(if ($x11GlxSwapRequestRateHzValues.Count -gt 0) { ($x11GlxSwapRequestRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — diagnostic until ordinal validation
+- X11 damage request rate: $(Format-Value $(if ($x11DamageRequestRateHzValues.Count -gt 0) { ($x11DamageRequestRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz")
+- Xlorie EGL submission rate: $(Format-Value $(if ($xlorieSubmittedRateHzValues.Count -gt 0) { ($xlorieSubmittedRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — diagnostic until producer join
+- Display-present event rate: $(Format-Value $(if ($displayPresentEventRateHzValues.Count -gt 0) { ($displayPresentEventRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — raw actual EGL timestamps, including repeated source content
+- Unique X11-source submission rate: $(Format-Value $(if ($uniqueSourceSubmitRateHzValues.Count -gt 0) { ($uniqueSourceSubmitRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — source-ordinal diagnostic, not producer FPS
+- Unique X11-source presentation rate: $(Format-Value $(if ($uniqueSourcePresentRateHzValues.Count -gt 0) { ($uniqueSourcePresentRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — source-ordinal diagnostic, not producer FPS
+- Duplicate source submissions: $(if ($presentationDuplicateSubmitCounts.Count -gt 0) { ($presentationDuplicateSubmitCounts | Measure-Object -Sum).Sum } else { 0 }); duplicate source presentations: $(if ($presentationDuplicatePresentCounts.Count -gt 0) { ($presentationDuplicatePresentCounts | Measure-Object -Sum).Sum } else { 0 })
+- Presentation timestamp capability: $(if ($presentationCapabilities.Count -gt 0) { $presentationCapabilities[-1] } else { "unavailable" })
 - Producer deadline misses: $missed ($(Format-Value $missRate "%"))
 - Producer stalls over 50 ms: $stalls
 - Correlation confidence: 0% — exact attribution is invalid until actual presentation events are joined.
 - Bottleneck: unknown — this report does not infer CPU or IPC causality from swap/gap ratios.
 
-The detailed system trace is `system.perfetto-trace`. Open it in Perfetto and
+The detailed system trace is system.perfetto-trace. Open it in Perfetto and
 correlate scheduler, frequency, SurfaceFlinger, and frame-lifecycle tracks with
-`frames.csv`. Any unsupported source remains unavailable rather than being
+frames.csv. Any unsupported source remains unavailable rather than being
 estimated as presentation ground truth.
 "@
 $report | Set-Content -LiteralPath (Join-Path $capturePath "report.md") -Encoding utf8

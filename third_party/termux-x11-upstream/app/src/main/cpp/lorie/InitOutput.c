@@ -105,6 +105,21 @@ static volatile uint32_t gAhbLockCalls = 0;
 static volatile uint32_t gAhbUnlockCalls = 0;
 static volatile uint32_t gAhbStickyHits = 0;
 static volatile uint32_t gAhbFlushSkipped = 0;
+static uint32_t gGlxSwapRequests = 0;
+static uint64_t gGlxSwapOrdinal = 0;
+static uint64_t gDamageOrdinal = 0;
+static uint8_t gOrdinalSource = 0; /* 1=GLX hook, 2=coalesced damage fallback */
+static uint64_t gUploadCalls = 0;
+static uint64_t gUploadBytes = 0;
+static uint64_t gUploadPixels = 0;
+static uint64_t gUploadCopyNs = 0;
+static uint64_t gUploadCopyMaxNs = 0;
+
+static uint64_t lorieMonotonicNs(void) {
+    struct timespec ts = {0};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ((uint64_t) ts.tv_sec * 1000000000ULL) + (uint64_t) ts.tv_nsec;
+}
 
 // Sticky AHB-lock flag (Slice 4). Default 0 = preserve upstream defensive
 // unlock/relock in lorieRedraw; 1 = skip the dance (valid when AHB is
@@ -453,6 +468,7 @@ static void loriePerformVblanks(void);
 
 static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
     int status, nonEmpty;
+    uint64_t acceptedOrdinal;
     LoriePixmapPriv* priv;
     PixmapPtr root = pScreenPtr && pScreenPtr->root ? pScreenPtr->GetWindowPixmap(pScreenPtr->root) : NULL;
     __sync_fetch_and_add(&gRedrawWakeups, 1);
@@ -494,6 +510,20 @@ static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
         }
 
         DamageEmpty(pvfb->damage);
+        acceptedOrdinal =
+            __atomic_load_n(&pvfb->state->acceptedFrameOrdinal, __ATOMIC_ACQUIRE);
+        if (!gOrdinalSource)
+            gOrdinalSource = acceptedOrdinal ? 1 : 2;
+        if (gOrdinalSource == 2)
+            acceptedOrdinal = ++gDamageOrdinal;
+        pvfb->state->damageAcceptedMonotonicNs =
+            gOrdinalSource == 1 ? pvfb->state->acceptedMonotonicNs : 0;
+        pvfb->state->damageMonotonicNs = lorieMonotonicNs();
+        pvfb->state->damageOrdinalSource = gOrdinalSource;
+        __atomic_store_n(
+            &pvfb->state->damageFrameOrdinal,
+            acceptedOrdinal,
+            __ATOMIC_RELEASE);
         pvfb->state->drawRequested = TRUE;
     }
 
@@ -522,6 +552,23 @@ static CARD32 lorieFramecounter(unused OsTimerPtr timer, unused CARD32 time, unu
     uint32_t ahbUnlockCalls = __sync_lock_test_and_set(&gAhbUnlockCalls, 0);
     uint32_t ahbStickyHits = __sync_lock_test_and_set(&gAhbStickyHits, 0);
     uint32_t ahbFlushSkipped = __sync_lock_test_and_set(&gAhbFlushSkipped, 0);
+    uint32_t glxSwapRequests = gGlxSwapRequests;
+    uint64_t uploadCalls = gUploadCalls;
+    uint64_t uploadBytes = gUploadBytes;
+    uint64_t uploadPixels = gUploadPixels;
+    uint64_t uploadCopyNs = gUploadCopyNs;
+    uint64_t uploadCopyMaxNs = gUploadCopyMaxNs;
+    uint64_t lastGlxOrdinal = gGlxSwapOrdinal;
+    gGlxSwapRequests = 0;
+    gUploadCalls = 0;
+    gUploadBytes = 0;
+    gUploadPixels = 0;
+    gUploadCopyNs = 0;
+    gUploadCopyMaxNs = 0;
+    uint64_t firstGlxOrdinal =
+        glxSwapRequests > 0 && lastGlxOrdinal >= glxSwapRequests
+            ? lastGlxOrdinal - glxSwapRequests + 1
+            : 0;
     struct timespec heartbeatTs;
     clock_gettime(CLOCK_MONOTONIC, &heartbeatTs);
     uint64_t heartbeatNs = (uint64_t) heartbeatTs.tv_sec * 1000000000ULL +
@@ -531,17 +578,51 @@ static CARD32 lorieFramecounter(unused OsTimerPtr timer, unused CARD32 time, unu
     log(INFO,
         "XlorieStageRatesV1: window_ms=5000 host_vsync_callback_rate_hz=%.1f "
         "renderer_wakeup_rate_hz=%.1f x11_damage_request_rate_hz=%.1f "
+        "x11_glx_swap_request_rate_hz=%.1f "
         "x11_present_attempt_rate_hz=%.1f x11_present_accepted_rate_hz=%.1f "
         "x11_present_rejected_rate_hz=%.1f x11_present_after_flip_rate_hz=%.1f "
-        "consumer_redraw_count=%u",
+        "consumer_redraw_count=%u first_glx_ordinal=%llu last_glx_ordinal=%llu",
         ((float) choreographerCallbacks) / 5.0f,
         ((float) redrawWakeups) / 5.0f,
         ((float) damageRequests) / 5.0f,
+        ((float) glxSwapRequests) / 5.0f,
         ((float) presentFlipAttempts) / 5.0f,
         ((float) presentFlipAccepted) / 5.0f,
         ((float) presentFlipRejected) / 5.0f,
         ((float) presentAfterFlips) / 5.0f,
-        pvfb->state->renderedFrames);
+        pvfb->state->renderedFrames,
+        (unsigned long long) firstGlxOrdinal,
+        (unsigned long long) lastGlxOrdinal);
+    log(INFO,
+        "XlorieCopyStatsV1: window_ms=5000 upload_call_rate_hz=%.1f "
+        "upload_calls=%llu upload_bytes=%llu upload_pixels=%llu "
+        "upload_copy_ns=%llu upload_copy_max_ns=%llu",
+        ((double) uploadCalls) / 5.0,
+        (unsigned long long) uploadCalls,
+        (unsigned long long) uploadBytes,
+        (unsigned long long) uploadPixels,
+        (unsigned long long) uploadCopyNs,
+        (unsigned long long) uploadCopyMaxNs);
+    uint32_t snapshotGeneration =
+        __atomic_load_n(&pvfb->state->telemetryGeneration, __ATOMIC_RELAXED);
+    __atomic_store_n(
+        &pvfb->state->telemetryGeneration,
+        snapshotGeneration + 1,
+        __ATOMIC_RELEASE);
+    pvfb->state->telemetryWindowMs = 5000;
+    pvfb->state->telemetryDamageRequests = damageRequests;
+    pvfb->state->telemetryGlxSwapRequests = glxSwapRequests;
+    pvfb->state->telemetryFirstGlxOrdinal = firstGlxOrdinal;
+    pvfb->state->telemetryLastGlxOrdinal = lastGlxOrdinal;
+    pvfb->state->telemetryUploadCalls = uploadCalls;
+    pvfb->state->telemetryUploadBytes = uploadBytes;
+    pvfb->state->telemetryUploadPixels = uploadPixels;
+    pvfb->state->telemetryUploadCopyNs = uploadCopyNs;
+    pvfb->state->telemetryUploadCopyMaxNs = uploadCopyMaxNs;
+    __atomic_store_n(
+        &pvfb->state->telemetryGeneration,
+        snapshotGeneration + 2,
+        __ATOMIC_RELEASE);
     log(INFO, "AhbLockTrace: sticky=%d lock_calls=%u unlock_calls=%u sticky_hits=%u flush_skipped=%u in 5.0s",
         lorieStickyAhbLock(), ahbLockCalls, ahbUnlockCalls, ahbStickyHits, ahbFlushSkipped);
     pvfb->state->renderedFrames = 0;
@@ -1078,6 +1159,10 @@ lorieUploadToScreen(PixmapPtr pDst, int x, int y, int w, int h, char *src, int s
     int bpp = pDst->drawable.bitsPerPixel;
     Bool wasLocked;
     int err;
+    uint64_t copyStartNs;
+    uint64_t copyElapsedNs;
+    uint64_t copiedBytes;
+    uint64_t copiedPixels;
 
     if (!priv || !priv->buffer)
         return FALSE;
@@ -1101,15 +1186,24 @@ lorieUploadToScreen(PixmapPtr pDst, int x, int y, int w, int h, char *src, int s
     dst_base = priv->locked;
     dst_pitch = desc->stride * (bpp / 8);
     bytes_per_pixel = bpp / 8;
+    copiedPixels = (uint64_t) w * (uint64_t) h;
+    copiedBytes = copiedPixels * (uint64_t) bytes_per_pixel;
 
     char *dst_row = (char *)dst_base + (size_t)y * (size_t)dst_pitch + (size_t)x * (size_t)bytes_per_pixel;
     char *src_row = src;
     int copy_bytes = w * bytes_per_pixel;
+    copyStartNs = lorieMonotonicNs();
     for (int i = 0; i < h; i++) {
         memcpy(dst_row, src_row, copy_bytes);
         dst_row += dst_pitch;
         src_row += src_pitch;
     }
+    copyElapsedNs = lorieMonotonicNs() - copyStartNs;
+    gUploadCalls++;
+    gUploadBytes += copiedBytes;
+    gUploadPixels += copiedPixels;
+    gUploadCopyNs += copyElapsedNs;
+    gUploadCopyMaxNs = max(gUploadCopyMaxNs, copyElapsedNs);
 
     if (!wasLocked) {
         __sync_fetch_and_add(&gAhbUnlockCalls, 1);
@@ -1251,7 +1345,15 @@ static dri3_screen_info_rec lorieDri3Info = {
         .get_drawable_modifiers = lorieGetDrawableModifiers
 };
 
-static GLboolean drawableSwapBuffers(unused ClientPtr client, unused __GLXdrawable * drawable) { return TRUE; }
+static GLboolean drawableSwapBuffers(unused ClientPtr client, unused __GLXdrawable * drawable) {
+    uint64_t ordinal = ++gGlxSwapOrdinal;
+    gGlxSwapRequests++;
+    if (pvfb && pvfb->state) {
+        pvfb->state->acceptedMonotonicNs = lorieMonotonicNs();
+        __atomic_store_n(&pvfb->state->acceptedFrameOrdinal, ordinal, __ATOMIC_RELEASE);
+    }
+    return TRUE;
+}
 static void drawableCopySubBuffer(unused __GLXdrawable * basePrivate, unused int x, unused int y, unused int w, unused int h) {}
 static __GLXdrawable * createDrawable(unused ClientPtr client, __GLXscreen * screen, DrawablePtr pDraw,
                                       unused XID drawId, int type, XID glxDrawId, __GLXconfig * glxConfig) {

@@ -86,7 +86,7 @@ class ArchitectureAnalyzerTest(unittest.TestCase):
     def test_ambiguous_consumer_fps_is_rejected(self) -> None:
         diagnostics = self._analyze(
             {
-                "scripts/analyze-frame-capture.ps1":
+                "scripts/metric-probe.ps1":
                     "$summary.xlorie_consumer_fps = 42\n"
             }
         )
@@ -95,7 +95,7 @@ class ArchitectureAnalyzerTest(unittest.TestCase):
     def test_canonical_pipeline_fps_stages_are_allowed(self) -> None:
         diagnostics = self._analyze(
             {
-                "scripts/analyze-frame-capture.ps1":
+                "scripts/metric-probe.ps1":
                     "produced_fps accepted_fps submitted_fps presented_fps\n"
             }
         )
@@ -127,6 +127,16 @@ class ArchitectureAnalyzerTest(unittest.TestCase):
             }
         )
         self.assertEqual(["TBL011"], [item.code for item in diagnostics])
+
+    def test_incomplete_frame_handoff_contract_is_rejected(self) -> None:
+        diagnostics = self._analyze(
+            {
+                "third_party/termux-x11-upstream/app/src/main/cpp/lorie/renderer.c":
+                    'log("XlorieHandoffV1:");\n'
+            }
+        )
+        self.assertTrue(diagnostics)
+        self.assertTrue(all(item.code == "TBL012" for item in diagnostics))
 
     def test_fast_analyzer_contract_is_strictly_under_sixty_seconds(self) -> None:
         self.assertEqual(60_000.0, FAST_ANALYZER_BUDGET_MS)

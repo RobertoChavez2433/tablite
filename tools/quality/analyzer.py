@@ -428,6 +428,70 @@ def check_capture_lifecycle_ownership(root: Path) -> list[Diagnostic]:
     return diagnostics
 
 
+def check_frame_handoff_contract(root: Path) -> list[Diagnostic]:
+    contracts = {
+        Path("third_party/rlawt/rlawt_nix.c"): (
+            "RLT_FRAME_RATE_V1",
+            "first_seq=",
+            "last_seq=",
+            "end_monotonic_ns=",
+        ),
+        Path("third_party/termux-x11-upstream/app/src/main/cpp/lorie/InitOutput.c"): (
+            "XlorieStageRatesV1:",
+            "x11_glx_swap_request_rate_hz=",
+            "first_glx_ordinal=",
+            "XlorieCopyStatsV1:",
+            "upload_bytes=",
+            "upload_copy_ns=",
+        ),
+        Path("third_party/termux-x11-upstream/app/src/main/cpp/lorie/renderer.c"): (
+            "XlorieHandoffV1:",
+            "source_generation=",
+            "ordinal_source=",
+            "source_ordinal_gap_count=",
+            "content_only_redraw_count=",
+            "cursor_only_redraw_count=",
+            "accepted_to_damage_status=",
+            "damage_to_redraw_sample_count=",
+            "avg_accepted_to_damage_ms=",
+            "avg_damage_to_redraw_ms=",
+            "XloriePresentationV1:",
+            "display_present_event_rate_hz=",
+            "unique_source_present_rate_hz=",
+            "duplicate_source_present_count=",
+            "telemetry_lost_count=",
+            "XlorieServerSnapshotV1:",
+        ),
+        Path("scripts/analyze-frame-capture.ps1"): (
+            "x11_glx_swap_request_rate_hz",
+            "x11_upload_call_rate_hz",
+            "display_present_event_rate_hz",
+            "unique_source_present_rate_hz",
+            "duplicate_source_presentations",
+            "source_ordinal_gaps",
+        ),
+    }
+    diagnostics: list[Diagnostic] = []
+    for relative, markers in contracts.items():
+        path = root / relative
+        if not path.exists():
+            continue
+        source = _read(path)
+        for marker in markers:
+            if marker not in source:
+                diagnostics.append(
+                    _line_diagnostic(
+                        root,
+                        path,
+                        1,
+                        "TBL012",
+                        "frame_handoff_contract",
+                        f"Required frame-handoff telemetry marker '{marker}' is missing.",
+                    )
+                )
+    return diagnostics
+
+
 ARCHITECTURE_CHECKS = (
     check_domain_purity,
     check_ui_boundaries,
@@ -439,6 +503,7 @@ ARCHITECTURE_CHECKS = (
     check_integrity_contract,
     check_telemetry_hot_path,
     check_capture_lifecycle_ownership,
+    check_frame_handoff_contract,
 )
 ARCHITECTURE_RULE_BUDGET_MS = 1_000.0
 ARCHITECTURE_TOTAL_BUDGET_MS = 5_000.0

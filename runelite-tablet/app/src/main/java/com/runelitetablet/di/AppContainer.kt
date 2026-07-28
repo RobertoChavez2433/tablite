@@ -81,5 +81,8 @@ class AppContainer(private val context: Context) {
                 stats.statePct
             )
         }
+        PerfDashboard.parseXlorieStageRatesLine(message)?.let(perf.dashboard::updateX11StageRates)
+        PerfDashboard.parseXloriePresentationLine(message)?.let(perf.dashboard::updatePresentationStats)
+        PerfDashboard.parseXlorieCopyStatsLine(message)?.let(perf.dashboard::updateCopyStats)
     }
 }

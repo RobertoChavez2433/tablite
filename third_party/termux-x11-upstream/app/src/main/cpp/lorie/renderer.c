@@ -168,7 +168,79 @@ static struct {
     uint64_t waitChoreographerNs; // time blocked by waitForNextFrame
     uint64_t waitContentNs;       // time blocked waiting for drawRequested
     uint64_t waitStateNs;         // time blocked on state/window/buffer changes
+    uint64_t firstSourceOrdinal;
+    uint64_t lastSourceOrdinal;
+    uint64_t sourceOrdinalGaps;
+    uint64_t sourceOrdinalDuplicates;
+    uint64_t sourceOrdinalMissing;
+    uint64_t glxOrdinalSamples;
+    uint64_t damageOrdinalSamples;
+    uint64_t contentRequestCount;
+    uint64_t cursorMoveRequestCount;
+    uint64_t cursorUpdateRequestCount;
+    uint64_t contentOnlyRedrawCount;
+    uint64_t cursorOnlyRedrawCount;
+    uint64_t mixedReasonRedrawCount;
+    uint64_t unclassifiedRedrawCount;
+    uint64_t totalAcceptedToDamageNs;
+    uint64_t maxAcceptedToDamageNs;
+    uint64_t totalDamageToRedrawNs;
+    uint64_t maxDamageToRedrawNs;
+    uint64_t acceptedToDamageSamples;
+    uint64_t damageToRedrawSamples;
 } rendererPerfStats;
+
+#define PRESENTATION_QUEUE_CAPACITY 64
+#define PRESENTATION_QUERY_BUDGET 8
+
+typedef struct {
+    EGLuint64KHR frameId;
+    uint64_t sourceGeneration;
+    uint64_t sourceOrdinal;
+    uint64_t submitMonotonicNs;
+} PendingPresentation;
+
+static struct {
+    bool extensionAdvertised;
+    bool functionsLoaded;
+    bool collectionEnabled;
+    bool displayPresentSupported;
+    PFNEGLGETNEXTFRAMEIDANDROIDPROC getNextFrameId;
+    PFNEGLGETFRAMETIMESTAMPSUPPORTEDANDROIDPROC getTimestampSupported;
+    PFNEGLGETFRAMETIMESTAMPSANDROIDPROC getFrameTimestamps;
+    PendingPresentation pending[PRESENTATION_QUEUE_CAPACITY];
+    uint32_t pendingHead;
+    uint32_t pendingCount;
+    uint64_t submitAttempts;
+    uint64_t submittedCount;
+    uint64_t uniqueSourceSubmitCount;
+    uint64_t duplicateSourceSubmitCount;
+    uint64_t missingSourceSubmitCount;
+    uint64_t swapFailureCount;
+    uint64_t presentedCount;
+    uint64_t uniqueSourcePresentCount;
+    uint64_t duplicateSourcePresentCount;
+    uint64_t missingSourcePresentCount;
+    uint64_t invalidTimestampCount;
+    uint64_t queryErrorCount;
+    uint64_t telemetryLostCount;
+    uint64_t firstSubmitMonotonicNs;
+    uint64_t lastSubmitMonotonicNs;
+    uint64_t firstUniqueSubmitMonotonicNs;
+    uint64_t lastUniqueSubmitMonotonicNs;
+    uint64_t firstPresentMonotonicNs;
+    uint64_t lastPresentMonotonicNs;
+    uint64_t firstUniquePresentMonotonicNs;
+    uint64_t lastUniquePresentMonotonicNs;
+    uint64_t lastSubmittedSourceGeneration;
+    uint64_t lastSubmittedSourceOrdinal;
+    uint64_t lastPresentedSourceGeneration;
+    uint64_t lastPresentedSourceOrdinal;
+} presentationTelemetry;
+
+static uint32_t lastServerTelemetryGeneration = 0;
+static uint64_t sourceStateGeneration = 0;
+static uint64_t lastRendererSourceOrdinal = 0;
 
 GLuint g_texture_program = 0, gv_pos = 0, gv_coords = 0;
 GLuint g_texture_program_bgra = 0, gv_pos_bgra = 0, gv_coords_bgra = 0;
@@ -179,6 +251,335 @@ static uint64_t rendererNowNs(void) {
     struct timespec ts = {0};
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ((uint64_t) ts.tv_sec * 1000000000ULL) + (uint64_t) ts.tv_nsec;
+}
+
+static bool rendererHasEglExtension(const char *extensions, const char *name) {
+    if (!extensions || !name || !*name || strchr(name, ' '))
+        return false;
+    size_t length = strlen(name);
+    const char *match = extensions;
+    while ((match = strstr(match, name))) {
+        bool startsAtBoundary = match == extensions || match[-1] == ' ';
+        bool endsAtBoundary = match[length] == '\0' || match[length] == ' ';
+        if (startsAtBoundary && endsAtBoundary)
+            return true;
+        match += length;
+    }
+    return false;
+}
+
+static void presentationInitCapabilities(void) {
+    const char *extensions = eglQueryString(egl_display, EGL_EXTENSIONS);
+    presentationTelemetry.extensionAdvertised =
+        rendererHasEglExtension(extensions, "EGL_ANDROID_get_frame_timestamps");
+    presentationTelemetry.getNextFrameId =
+        (PFNEGLGETNEXTFRAMEIDANDROIDPROC) eglGetProcAddress("eglGetNextFrameIdANDROID");
+    presentationTelemetry.getTimestampSupported =
+        (PFNEGLGETFRAMETIMESTAMPSUPPORTEDANDROIDPROC)
+            eglGetProcAddress("eglGetFrameTimestampSupportedANDROID");
+    presentationTelemetry.getFrameTimestamps =
+        (PFNEGLGETFRAMETIMESTAMPSANDROIDPROC)
+            eglGetProcAddress("eglGetFrameTimestampsANDROID");
+    presentationTelemetry.functionsLoaded =
+        presentationTelemetry.getNextFrameId &&
+        presentationTelemetry.getTimestampSupported &&
+        presentationTelemetry.getFrameTimestamps;
+}
+
+static void presentationResetSurface(void) {
+    presentationTelemetry.collectionEnabled = false;
+    presentationTelemetry.displayPresentSupported = false;
+    presentationTelemetry.pendingHead = 0;
+    presentationTelemetry.pendingCount = 0;
+}
+
+static void presentationConfigureSurface(EGLSurface surface) {
+    presentationResetSurface();
+    if (surface == EGL_NO_SURFACE ||
+        !presentationTelemetry.extensionAdvertised ||
+        !presentationTelemetry.functionsLoaded) {
+        log(
+            "XloriePresentationCapsV1: extension_advertised=%d functions_loaded=%d "
+            "collection_enabled=0 display_present_supported=0",
+            presentationTelemetry.extensionAdvertised ? 1 : 0,
+            presentationTelemetry.functionsLoaded ? 1 : 0);
+        return;
+    }
+
+    presentationTelemetry.collectionEnabled =
+        eglSurfaceAttrib(egl_display, surface, EGL_TIMESTAMPS_ANDROID, EGL_TRUE) == EGL_TRUE;
+    if (presentationTelemetry.collectionEnabled) {
+        presentationTelemetry.displayPresentSupported =
+            presentationTelemetry.getTimestampSupported(
+                egl_display, surface, EGL_DISPLAY_PRESENT_TIME_ANDROID) == EGL_TRUE;
+    }
+    log(
+        "XloriePresentationCapsV1: extension_advertised=%d functions_loaded=%d "
+        "collection_enabled=%d display_present_supported=%d",
+        presentationTelemetry.extensionAdvertised ? 1 : 0,
+        presentationTelemetry.functionsLoaded ? 1 : 0,
+        presentationTelemetry.collectionEnabled ? 1 : 0,
+        presentationTelemetry.displayPresentSupported ? 1 : 0);
+}
+
+static void presentationPopPending(void) {
+    if (!presentationTelemetry.pendingCount)
+        return;
+    presentationTelemetry.pendingHead =
+        (presentationTelemetry.pendingHead + 1) % PRESENTATION_QUEUE_CAPACITY;
+    presentationTelemetry.pendingCount--;
+}
+
+static void presentationPoll(void) {
+    if (!presentationTelemetry.collectionEnabled ||
+        !presentationTelemetry.displayPresentSupported)
+        return;
+
+    uint32_t queried = 0;
+    while (presentationTelemetry.pendingCount && queried < PRESENTATION_QUERY_BUDGET) {
+        PendingPresentation *pending =
+            &presentationTelemetry.pending[presentationTelemetry.pendingHead];
+        EGLint timestampName = EGL_DISPLAY_PRESENT_TIME_ANDROID;
+        EGLnsecsANDROID timestampValue = EGL_TIMESTAMP_PENDING_ANDROID;
+        queried++;
+        if (presentationTelemetry.getFrameTimestamps(
+                egl_display, sfc, pending->frameId, 1, &timestampName, &timestampValue) != EGL_TRUE) {
+            presentationTelemetry.queryErrorCount++;
+            presentationPopPending();
+            continue;
+        }
+        if (timestampValue == EGL_TIMESTAMP_PENDING_ANDROID)
+            break;
+        if (timestampValue == EGL_TIMESTAMP_INVALID_ANDROID || timestampValue <= 0) {
+            presentationTelemetry.invalidTimestampCount++;
+            presentationPopPending();
+            continue;
+        }
+
+        uint64_t presentNs = (uint64_t) timestampValue;
+        if (!presentationTelemetry.firstPresentMonotonicNs)
+            presentationTelemetry.firstPresentMonotonicNs = presentNs;
+        presentationTelemetry.lastPresentMonotonicNs = presentNs;
+        presentationTelemetry.presentedCount++;
+        if (!pending->sourceGeneration || !pending->sourceOrdinal) {
+            presentationTelemetry.missingSourcePresentCount++;
+        } else if (
+            pending->sourceGeneration == presentationTelemetry.lastPresentedSourceGeneration &&
+            pending->sourceOrdinal <= presentationTelemetry.lastPresentedSourceOrdinal) {
+            presentationTelemetry.duplicateSourcePresentCount++;
+        } else {
+            presentationTelemetry.lastPresentedSourceGeneration = pending->sourceGeneration;
+            presentationTelemetry.lastPresentedSourceOrdinal = pending->sourceOrdinal;
+            presentationTelemetry.uniqueSourcePresentCount++;
+            if (!presentationTelemetry.firstUniquePresentMonotonicNs)
+                presentationTelemetry.firstUniquePresentMonotonicNs = presentNs;
+            presentationTelemetry.lastUniquePresentMonotonicNs = presentNs;
+        }
+        presentationPopPending();
+    }
+}
+
+static bool presentationGetNextFrameId(EGLuint64KHR *frameId) {
+    return presentationTelemetry.collectionEnabled &&
+        presentationTelemetry.displayPresentSupported &&
+        presentationTelemetry.getNextFrameId(egl_display, sfc, frameId) == EGL_TRUE;
+}
+
+static void presentationRecordSubmission(
+        uint64_t sourceGeneration,
+        uint64_t sourceOrdinal,
+        uint64_t submitMonotonicNs,
+        bool swapSucceeded,
+        bool frameIdValid,
+        EGLuint64KHR frameId) {
+    presentationTelemetry.submitAttempts++;
+    if (!swapSucceeded) {
+        presentationTelemetry.swapFailureCount++;
+        return;
+    }
+
+    presentationTelemetry.submittedCount++;
+    if (!presentationTelemetry.firstSubmitMonotonicNs)
+        presentationTelemetry.firstSubmitMonotonicNs = submitMonotonicNs;
+    presentationTelemetry.lastSubmitMonotonicNs = submitMonotonicNs;
+    if (!sourceGeneration || !sourceOrdinal) {
+        presentationTelemetry.missingSourceSubmitCount++;
+    } else if (
+        sourceGeneration == presentationTelemetry.lastSubmittedSourceGeneration &&
+        sourceOrdinal <= presentationTelemetry.lastSubmittedSourceOrdinal) {
+        presentationTelemetry.duplicateSourceSubmitCount++;
+    } else {
+        presentationTelemetry.lastSubmittedSourceGeneration = sourceGeneration;
+        presentationTelemetry.lastSubmittedSourceOrdinal = sourceOrdinal;
+        presentationTelemetry.uniqueSourceSubmitCount++;
+        if (!presentationTelemetry.firstUniqueSubmitMonotonicNs)
+            presentationTelemetry.firstUniqueSubmitMonotonicNs = submitMonotonicNs;
+        presentationTelemetry.lastUniqueSubmitMonotonicNs = submitMonotonicNs;
+    }
+
+    presentationPoll();
+    if (!frameIdValid)
+        return;
+    if (presentationTelemetry.pendingCount == PRESENTATION_QUEUE_CAPACITY) {
+        presentationTelemetry.telemetryLostCount++;
+        presentationPopPending();
+    }
+    uint32_t tail =
+        (presentationTelemetry.pendingHead + presentationTelemetry.pendingCount) %
+        PRESENTATION_QUEUE_CAPACITY;
+    presentationTelemetry.pending[tail] = (PendingPresentation) {
+        .frameId = frameId,
+        .sourceGeneration = sourceGeneration,
+        .sourceOrdinal = sourceOrdinal,
+        .submitMonotonicNs = submitMonotonicNs,
+    };
+    presentationTelemetry.pendingCount++;
+}
+
+static void presentationLogAndResetWindow(void) {
+    presentationPoll();
+    double submittedRateHz =
+        presentationTelemetry.submittedCount > 1 &&
+        presentationTelemetry.lastSubmitMonotonicNs >
+            presentationTelemetry.firstSubmitMonotonicNs
+            ? ((double) (presentationTelemetry.submittedCount - 1) * 1000000000.0) /
+                (double) (
+                    presentationTelemetry.lastSubmitMonotonicNs -
+                    presentationTelemetry.firstSubmitMonotonicNs)
+            : 0.0;
+    double displayPresentEventRateHz =
+        presentationTelemetry.presentedCount > 1 &&
+        presentationTelemetry.lastPresentMonotonicNs >
+            presentationTelemetry.firstPresentMonotonicNs
+            ? ((double) (presentationTelemetry.presentedCount - 1) * 1000000000.0) /
+                (double) (
+                    presentationTelemetry.lastPresentMonotonicNs -
+                    presentationTelemetry.firstPresentMonotonicNs)
+            : 0.0;
+    double uniqueSourceSubmitRateHz =
+        presentationTelemetry.uniqueSourceSubmitCount > 1 &&
+        presentationTelemetry.lastUniqueSubmitMonotonicNs >
+            presentationTelemetry.firstUniqueSubmitMonotonicNs
+            ? ((double) (presentationTelemetry.uniqueSourceSubmitCount - 1) * 1000000000.0) /
+                (double) (
+                    presentationTelemetry.lastUniqueSubmitMonotonicNs -
+                    presentationTelemetry.firstUniqueSubmitMonotonicNs)
+            : 0.0;
+    double uniqueSourcePresentRateHz =
+        presentationTelemetry.uniqueSourcePresentCount > 1 &&
+        presentationTelemetry.lastUniquePresentMonotonicNs >
+            presentationTelemetry.firstUniquePresentMonotonicNs
+            ? ((double) (presentationTelemetry.uniqueSourcePresentCount - 1) * 1000000000.0) /
+                (double) (
+                    presentationTelemetry.lastUniquePresentMonotonicNs -
+                    presentationTelemetry.firstUniquePresentMonotonicNs)
+            : 0.0;
+
+    log(
+        "XloriePresentationV1: capability=%s source_generation=%llu "
+        "submit_attempts=%llu submitted_count=%llu "
+        "swap_failure_count=%llu xlorie_submitted_rate_hz=%.3f "
+        "unique_source_submit_count=%llu duplicate_source_submit_count=%llu "
+        "missing_source_submit_count=%llu unique_source_submit_rate_hz=%.3f "
+        "presented_count=%llu display_present_event_rate_hz=%.3f "
+        "unique_source_present_count=%llu duplicate_source_present_count=%llu "
+        "missing_source_present_count=%llu unique_source_present_rate_hz=%.3f "
+        "pending_count=%u invalid_timestamp_count=%llu "
+        "query_error_count=%llu telemetry_lost_count=%llu first_present_ns=%llu "
+        "last_present_ns=%llu",
+        presentationTelemetry.displayPresentSupported ? "supported" : "unsupported",
+        (unsigned long long) sourceStateGeneration,
+        (unsigned long long) presentationTelemetry.submitAttempts,
+        (unsigned long long) presentationTelemetry.submittedCount,
+        (unsigned long long) presentationTelemetry.swapFailureCount,
+        submittedRateHz,
+        (unsigned long long) presentationTelemetry.uniqueSourceSubmitCount,
+        (unsigned long long) presentationTelemetry.duplicateSourceSubmitCount,
+        (unsigned long long) presentationTelemetry.missingSourceSubmitCount,
+        uniqueSourceSubmitRateHz,
+        (unsigned long long) presentationTelemetry.presentedCount,
+        displayPresentEventRateHz,
+        (unsigned long long) presentationTelemetry.uniqueSourcePresentCount,
+        (unsigned long long) presentationTelemetry.duplicateSourcePresentCount,
+        (unsigned long long) presentationTelemetry.missingSourcePresentCount,
+        uniqueSourcePresentRateHz,
+        presentationTelemetry.pendingCount,
+        (unsigned long long) presentationTelemetry.invalidTimestampCount,
+        (unsigned long long) presentationTelemetry.queryErrorCount,
+        (unsigned long long) presentationTelemetry.telemetryLostCount,
+        (unsigned long long) presentationTelemetry.firstPresentMonotonicNs,
+        (unsigned long long) presentationTelemetry.lastPresentMonotonicNs);
+
+    presentationTelemetry.submitAttempts = 0;
+    presentationTelemetry.submittedCount = 0;
+    presentationTelemetry.uniqueSourceSubmitCount = 0;
+    presentationTelemetry.duplicateSourceSubmitCount = 0;
+    presentationTelemetry.missingSourceSubmitCount = 0;
+    presentationTelemetry.swapFailureCount = 0;
+    presentationTelemetry.presentedCount = 0;
+    presentationTelemetry.uniqueSourcePresentCount = 0;
+    presentationTelemetry.duplicateSourcePresentCount = 0;
+    presentationTelemetry.missingSourcePresentCount = 0;
+    presentationTelemetry.invalidTimestampCount = 0;
+    presentationTelemetry.queryErrorCount = 0;
+    presentationTelemetry.telemetryLostCount = 0;
+    presentationTelemetry.firstSubmitMonotonicNs = 0;
+    presentationTelemetry.lastSubmitMonotonicNs = 0;
+    presentationTelemetry.firstUniqueSubmitMonotonicNs = 0;
+    presentationTelemetry.lastUniqueSubmitMonotonicNs = 0;
+    presentationTelemetry.firstPresentMonotonicNs = 0;
+    presentationTelemetry.lastPresentMonotonicNs = 0;
+    presentationTelemetry.firstUniquePresentMonotonicNs = 0;
+    presentationTelemetry.lastUniquePresentMonotonicNs = 0;
+}
+
+static void rendererLogServerTelemetrySnapshot(void) {
+    if (!state)
+        return;
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+        uint32_t before =
+            __atomic_load_n(&state->telemetryGeneration, __ATOMIC_ACQUIRE);
+        if (!before || (before & 1U) || before == lastServerTelemetryGeneration)
+            return;
+
+        uint32_t windowMs = state->telemetryWindowMs;
+        uint32_t damageRequests = state->telemetryDamageRequests;
+        uint32_t glxSwapRequests = state->telemetryGlxSwapRequests;
+        uint64_t firstGlxOrdinal = state->telemetryFirstGlxOrdinal;
+        uint64_t lastGlxOrdinal = state->telemetryLastGlxOrdinal;
+        uint64_t uploadCalls = state->telemetryUploadCalls;
+        uint64_t uploadBytes = state->telemetryUploadBytes;
+        uint64_t uploadPixels = state->telemetryUploadPixels;
+        uint64_t uploadCopyNs = state->telemetryUploadCopyNs;
+        uint64_t uploadCopyMaxNs = state->telemetryUploadCopyMaxNs;
+        uint32_t after =
+            __atomic_load_n(&state->telemetryGeneration, __ATOMIC_ACQUIRE);
+        if (before != after || (after & 1U))
+            continue;
+
+        lastServerTelemetryGeneration = after;
+        double seconds = windowMs > 0 ? windowMs / 1000.0 : 0.0;
+        log(
+            "XlorieServerSnapshotV1: generation=%u window_ms=%u "
+            "x11_damage_request_rate_hz=%.3f x11_glx_swap_request_rate_hz=%.3f "
+            "first_glx_ordinal=%llu last_glx_ordinal=%llu "
+            "upload_call_rate_hz=%.3f upload_calls=%llu upload_bytes=%llu "
+            "upload_pixels=%llu upload_copy_ns=%llu upload_copy_max_ns=%llu",
+            after,
+            windowMs,
+            seconds > 0.0 ? damageRequests / seconds : 0.0,
+            seconds > 0.0 ? glxSwapRequests / seconds : 0.0,
+            (unsigned long long) firstGlxOrdinal,
+            (unsigned long long) lastGlxOrdinal,
+            seconds > 0.0 ? uploadCalls / seconds : 0.0,
+            (unsigned long long) uploadCalls,
+            (unsigned long long) uploadBytes,
+            (unsigned long long) uploadPixels,
+            (unsigned long long) uploadCopyNs,
+            (unsigned long long) uploadCopyMaxNs);
+        return;
+    }
 }
 
 typedef enum {
@@ -203,7 +604,20 @@ WaitReason classifyWaitReason(bool hasState, bool surfaceAvailable, bool waitFor
     return WAIT_NONE;
 }
 
-static void rendererLogRedrawPerfSample(uint64_t redrawStartNs, uint64_t lockNs, uint64_t fenceNs, uint64_t swapNs, uint64_t redrawNs) {
+static void rendererLogRedrawPerfSample(
+        uint64_t redrawStartNs,
+        uint64_t sourceOrdinal,
+        uint8_t ordinalSource,
+        uint64_t sourceGeneration,
+        bool contentRequested,
+        bool cursorMoved,
+        bool cursorUpdated,
+        uint64_t acceptedToDamageNs,
+        uint64_t damageToRedrawNs,
+        uint64_t lockNs,
+        uint64_t fenceNs,
+        uint64_t swapNs,
+        uint64_t redrawNs) {
     uint64_t interRedrawNs = 0;
     if (!rendererPerfStats.windowStartNs)
         rendererPerfStats.windowStartNs = redrawStartNs;
@@ -221,6 +635,55 @@ static void rendererLogRedrawPerfSample(uint64_t redrawStartNs, uint64_t lockNs,
     rendererPerfStats.maxFenceNs = max(rendererPerfStats.maxFenceNs, fenceNs);
     rendererPerfStats.maxSwapNs = max(rendererPerfStats.maxSwapNs, swapNs);
     rendererPerfStats.maxFrameNs = max(rendererPerfStats.maxFrameNs, redrawNs);
+
+    if (contentRequested)
+        rendererPerfStats.contentRequestCount++;
+    if (cursorMoved)
+        rendererPerfStats.cursorMoveRequestCount++;
+    if (cursorUpdated)
+        rendererPerfStats.cursorUpdateRequestCount++;
+    bool cursorRequested = cursorMoved || cursorUpdated;
+    if (contentRequested && cursorRequested)
+        rendererPerfStats.mixedReasonRedrawCount++;
+    else if (contentRequested)
+        rendererPerfStats.contentOnlyRedrawCount++;
+    else if (cursorRequested)
+        rendererPerfStats.cursorOnlyRedrawCount++;
+    else
+        rendererPerfStats.unclassifiedRedrawCount++;
+
+    if (!sourceOrdinal) {
+        rendererPerfStats.sourceOrdinalMissing++;
+    } else {
+        if (ordinalSource == 1)
+            rendererPerfStats.glxOrdinalSamples++;
+        else if (ordinalSource == 2)
+            rendererPerfStats.damageOrdinalSamples++;
+        if (!rendererPerfStats.firstSourceOrdinal)
+            rendererPerfStats.firstSourceOrdinal = sourceOrdinal;
+        if (lastRendererSourceOrdinal) {
+            if (sourceOrdinal == lastRendererSourceOrdinal) {
+                rendererPerfStats.sourceOrdinalDuplicates++;
+            } else if (sourceOrdinal > lastRendererSourceOrdinal + 1) {
+                rendererPerfStats.sourceOrdinalGaps +=
+                    sourceOrdinal - lastRendererSourceOrdinal - 1;
+            }
+        }
+        lastRendererSourceOrdinal = sourceOrdinal;
+        rendererPerfStats.lastSourceOrdinal = sourceOrdinal;
+    }
+    if (acceptedToDamageNs) {
+        rendererPerfStats.totalAcceptedToDamageNs += acceptedToDamageNs;
+        rendererPerfStats.maxAcceptedToDamageNs =
+            max(rendererPerfStats.maxAcceptedToDamageNs, acceptedToDamageNs);
+        rendererPerfStats.acceptedToDamageSamples++;
+    }
+    if (damageToRedrawNs) {
+        rendererPerfStats.totalDamageToRedrawNs += damageToRedrawNs;
+        rendererPerfStats.maxDamageToRedrawNs =
+            max(rendererPerfStats.maxDamageToRedrawNs, damageToRedrawNs);
+        rendererPerfStats.damageToRedrawSamples++;
+    }
 
     if (interRedrawNs > 0) {
         rendererPerfStats.totalInterFrameNs += interRedrawNs;
@@ -245,6 +708,14 @@ static void rendererLogRedrawPerfSample(uint64_t redrawStartNs, uint64_t lockNs,
     double waitChoreoMs = rendererPerfStats.waitChoreographerNs / 1000000.0;
     double waitContentMs = rendererPerfStats.waitContentNs / 1000000.0;
     double waitStateMs = rendererPerfStats.waitStateNs / 1000000.0;
+    double avgAcceptedToDamageMs = rendererPerfStats.acceptedToDamageSamples
+        ? rendererPerfStats.totalAcceptedToDamageNs / 1000000.0 /
+            (double) rendererPerfStats.acceptedToDamageSamples
+        : 0.0;
+    double avgDamageToRedrawMs = rendererPerfStats.damageToRedrawSamples
+        ? rendererPerfStats.totalDamageToRedrawNs / 1000000.0 /
+            (double) rendererPerfStats.damageToRedrawSamples
+        : 0.0;
 
     log(
         "XloriePerf: consumer_redraws=%llu avg_lock_ms=%.3f avg_fence_ms=%.3f avg_swap_ms=%.3f avg_redraw_ms=%.3f avg_inter_redraw_ms=%.3f xlorie_consumer_redraw_rate_hz=%.1f"
@@ -263,6 +734,49 @@ static void rendererLogRedrawPerfSample(uint64_t redrawStartNs, uint64_t lockNs,
         rendererPerfStats.maxInterFrameNs / 1000000.0,
         waitChoreoMs, waitContentMs, waitStateMs
     );
+    log(
+        "XlorieHandoffV1: source_generation=%llu "
+        "first_source_ordinal=%llu last_source_ordinal=%llu "
+        "ordinal_source=%s "
+        "consumer_redraw_count=%llu source_ordinal_gap_count=%llu "
+        "source_ordinal_duplicate_count=%llu source_ordinal_missing_count=%llu "
+        "content_request_count=%llu cursor_move_request_count=%llu "
+        "cursor_update_request_count=%llu content_only_redraw_count=%llu "
+        "cursor_only_redraw_count=%llu mixed_reason_redraw_count=%llu "
+        "unclassified_redraw_count=%llu "
+        "accepted_to_damage_sample_count=%llu accepted_to_damage_status=%s "
+        "avg_accepted_to_damage_ms=%.3f max_accepted_to_damage_ms=%.3f "
+        "damage_to_redraw_sample_count=%llu "
+        "avg_damage_to_redraw_ms=%.3f max_damage_to_redraw_ms=%.3f",
+        (unsigned long long) sourceGeneration,
+        (unsigned long long) rendererPerfStats.firstSourceOrdinal,
+        (unsigned long long) rendererPerfStats.lastSourceOrdinal,
+        rendererPerfStats.glxOrdinalSamples && rendererPerfStats.damageOrdinalSamples
+            ? "mixed"
+            : rendererPerfStats.glxOrdinalSamples ? "glx" :
+                rendererPerfStats.damageOrdinalSamples ? "damage" : "unavailable",
+        (unsigned long long) rendererPerfStats.consumerRedrawCount,
+        (unsigned long long) rendererPerfStats.sourceOrdinalGaps,
+        (unsigned long long) rendererPerfStats.sourceOrdinalDuplicates,
+        (unsigned long long) rendererPerfStats.sourceOrdinalMissing,
+        (unsigned long long) rendererPerfStats.contentRequestCount,
+        (unsigned long long) rendererPerfStats.cursorMoveRequestCount,
+        (unsigned long long) rendererPerfStats.cursorUpdateRequestCount,
+        (unsigned long long) rendererPerfStats.contentOnlyRedrawCount,
+        (unsigned long long) rendererPerfStats.cursorOnlyRedrawCount,
+        (unsigned long long) rendererPerfStats.mixedReasonRedrawCount,
+        (unsigned long long) rendererPerfStats.unclassifiedRedrawCount,
+        (unsigned long long) rendererPerfStats.acceptedToDamageSamples,
+        rendererPerfStats.acceptedToDamageSamples
+            ? "available"
+            : "unavailable_no_accept_boundary",
+        avgAcceptedToDamageMs,
+        rendererPerfStats.maxAcceptedToDamageNs / 1000000.0,
+        (unsigned long long) rendererPerfStats.damageToRedrawSamples,
+        avgDamageToRedrawMs,
+        rendererPerfStats.maxDamageToRedrawNs / 1000000.0);
+    presentationLogAndResetWindow();
+    rendererLogServerTelemetrySnapshot();
 
     rendererPerfStats.windowStartNs = redrawStartNs;
     rendererPerfStats.consumerRedrawCount = 0;
@@ -281,6 +795,26 @@ static void rendererLogRedrawPerfSample(uint64_t redrawStartNs, uint64_t lockNs,
     rendererPerfStats.waitChoreographerNs = 0;
     rendererPerfStats.waitContentNs = 0;
     rendererPerfStats.waitStateNs = 0;
+    rendererPerfStats.firstSourceOrdinal = 0;
+    rendererPerfStats.lastSourceOrdinal = 0;
+    rendererPerfStats.sourceOrdinalGaps = 0;
+    rendererPerfStats.sourceOrdinalDuplicates = 0;
+    rendererPerfStats.sourceOrdinalMissing = 0;
+    rendererPerfStats.glxOrdinalSamples = 0;
+    rendererPerfStats.damageOrdinalSamples = 0;
+    rendererPerfStats.contentRequestCount = 0;
+    rendererPerfStats.cursorMoveRequestCount = 0;
+    rendererPerfStats.cursorUpdateRequestCount = 0;
+    rendererPerfStats.contentOnlyRedrawCount = 0;
+    rendererPerfStats.cursorOnlyRedrawCount = 0;
+    rendererPerfStats.mixedReasonRedrawCount = 0;
+    rendererPerfStats.unclassifiedRedrawCount = 0;
+    rendererPerfStats.totalAcceptedToDamageNs = 0;
+    rendererPerfStats.maxAcceptedToDamageNs = 0;
+    rendererPerfStats.totalDamageToRedrawNs = 0;
+    rendererPerfStats.maxDamageToRedrawNs = 0;
+    rendererPerfStats.acceptedToDamageSamples = 0;
+    rendererPerfStats.damageToRedrawSamples = 0;
 }
 
 static void pthreadCondVarProxyInit(void);
@@ -336,6 +870,7 @@ int rendererInitThread(void) {
         return printEglError("Unable to initialize EGL", __LINE__);
 
     log("Xlorie: Initialized EGL version %d.%d\n", major, minor);
+    presentationInitCapabilities();
     eglBindAPI(EGL_OPENGL_ES_API);
 
     if (eglChooseConfig(egl_display, configAttribs, &cfg, 1, &numConfigs) != EGL_TRUE &&
@@ -689,6 +1224,7 @@ void rendererSetWindow(ANativeWindow* newWin) {
 
 static inline __always_inline void releaseWinAndSurface(ANativeWindow** anw, EGLSurface *esfc) {
     if (esfc && *esfc && *esfc != defaultSfc) {
+        presentationResetSurface();
         // Requeue the dequeued buffer, causes flickering during window reconfiguring
         eglSwapBuffers(egl_display, *esfc);
         if (eglMakeCurrent(egl_display, defaultSfc, defaultSfc, ctx) != EGL_TRUE)
@@ -739,6 +1275,7 @@ void rendererRefreshContext(void) {
     }
 
     eglSwapInterval(egl_display, 0);
+    presentationConfigureSurface(sfc);
 
     // We should redraw image at least once right after surface change
     if (state)
@@ -763,6 +1300,19 @@ void rendererRedrawLocked(bool* waitingForBuffers) {
     uint64_t fenceNs;
     uint64_t swapNs;
     uint64_t frameEndNs;
+    uint64_t sourceOrdinal;
+    uint64_t sourceGeneration;
+    uint8_t ordinalSource;
+    uint64_t acceptedMonotonicNs;
+    uint64_t damageMonotonicNs;
+    uint64_t acceptedToDamageNs = 0;
+    uint64_t damageToRedrawNs = 0;
+    EGLuint64KHR platformFrameId = 0;
+    bool platformFrameIdValid;
+    bool swapSucceeded;
+    bool contentRequested;
+    bool cursorMoved;
+    bool cursorUpdated;
     // The buffer will not be released until this function ends, but main thread can modify buffer list
     pthread_spin_lock(&bufferLock);
     LorieBuffer *buffer = LorieBufferList_findById(&buffers, state->rootWindowTextureID);
@@ -783,6 +1333,20 @@ void rendererRedrawLocked(bool* waitingForBuffers) {
     lockStartNs = rendererNowNs();
     lorie_mutex_lock(&state->lock, &state->lockingPid);
     lockNs = rendererNowNs() - lockStartNs;
+    sourceOrdinal = __atomic_load_n(&state->damageFrameOrdinal, __ATOMIC_ACQUIRE);
+    sourceGeneration = sourceStateGeneration;
+    ordinalSource = state->damageOrdinalSource;
+    acceptedMonotonicNs = state->damageAcceptedMonotonicNs;
+    damageMonotonicNs = state->damageMonotonicNs;
+    contentRequested = state->drawRequested;
+    cursorMoved = state->cursor.moved;
+    cursorUpdated = state->cursor.updated;
+    if (sourceOrdinal && acceptedMonotonicNs &&
+        damageMonotonicNs >= acceptedMonotonicNs) {
+        acceptedToDamageNs = damageMonotonicNs - acceptedMonotonicNs;
+    }
+    if (damageMonotonicNs && frameStartNs >= damageMonotonicNs)
+        damageToRedrawNs = frameStartNs - damageMonotonicNs;
     state->drawRequested = FALSE;
 
     LorieBuffer_bindTexture(buffer);
@@ -819,13 +1383,35 @@ void rendererRedrawLocked(bool* waitingForBuffers) {
     lorie_mutex_unlock(&state->lock, &state->lockingPid);
 
     swapStartNs = rendererNowNs();
-    if (eglSwapBuffers(egl_display, sfc) != EGL_TRUE)
+    platformFrameIdValid = presentationGetNextFrameId(&platformFrameId);
+    swapSucceeded = eglSwapBuffers(egl_display, sfc) == EGL_TRUE;
+    if (!swapSucceeded)
         printEglError("Failed to swap buffers", __LINE__);
     swapNs = rendererNowNs() - swapStartNs;
+    presentationRecordSubmission(
+        sourceGeneration,
+        sourceOrdinal,
+        rendererNowNs(),
+        swapSucceeded,
+        platformFrameIdValid,
+        platformFrameId);
 
     state->renderedFrames++;
     frameEndNs = rendererNowNs();
-    rendererLogRedrawPerfSample(frameStartNs, lockNs, fenceNs, swapNs, frameEndNs - frameStartNs);
+    rendererLogRedrawPerfSample(
+        frameStartNs,
+        sourceOrdinal,
+        ordinalSource,
+        sourceGeneration,
+        contentRequested,
+        cursorMoved,
+        cursorUpdated,
+        acceptedToDamageNs,
+        damageToRedrawNs,
+        lockNs,
+        fenceNs,
+        swapNs,
+        frameEndNs - frameStartNs);
 }
 
 static inline __always_inline bool rendererShouldWait(bool *waitingForBuffers) {
@@ -888,6 +1474,7 @@ __noreturn static void* rendererThread(void) {
 
         if (stateChanged) {
             struct lorie_shared_server_state* oldState = NULL;
+            bool sourceStateChanged = pendingState != state;
             if (state && pendingState != state)
                 oldState = state;
 
@@ -895,6 +1482,14 @@ __noreturn static void* rendererThread(void) {
             pendingState = NULL;
             stateChanged = false;
             waitingForBuffers = false;
+            if (sourceStateChanged) {
+                sourceStateGeneration++;
+                lastRendererSourceOrdinal = 0;
+                presentationTelemetry.lastSubmittedSourceGeneration = 0;
+                presentationTelemetry.lastSubmittedSourceOrdinal = 0;
+                presentationTelemetry.lastPresentedSourceGeneration = 0;
+                presentationTelemetry.lastPresentedSourceOrdinal = 0;
+            }
 
             if (state)
                 state->surfaceAvailable = win != defaultWin;

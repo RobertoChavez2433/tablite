@@ -211,7 +211,15 @@ class DebugLogServer(
                         source = source, file = "", lineNum = 0, correlationId = null
                     )
                     broadcast(json)
-                    if (msg.contains("XloriePerf:") || msg.contains("RLT_FRAME_RATE_V1")) {
+                    if (
+                        msg.contains("XloriePerf:") ||
+                        msg.contains("XlorieStageRatesV1:") ||
+                        msg.contains("XlorieCopyStatsV1:") ||
+                        msg.contains("XlorieHandoffV1:") ||
+                        msg.contains("XloriePresentationV1:") ||
+                        msg.contains("XlorieServerSnapshotV1:") ||
+                        msg.contains("RLT_FRAME_RATE_V1")
+                    ) {
                         nativeLogListener?.invoke(msg)
                     }
                 }

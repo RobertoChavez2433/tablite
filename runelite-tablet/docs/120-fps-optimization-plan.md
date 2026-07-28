@@ -112,6 +112,30 @@ Implementation checkpoint (2026-07-28):
   the canonical analyzer.
 - Presentation correlation for the native X11 path remains incomplete. No
   current number is accepted as uniquely presented FPS.
+- The SM-X920 supports `EGL_ANDROID_get_frame_timestamps`, including actual
+  display-present timestamps. Xlorie now keeps raw submissions/present events
+  separate from unique X11-source submissions/presentations and counts
+  duplicate or missing source ordinals. These source-ordinal rates remain
+  diagnostic until they are joined to rlawt producer sequences.
+- The VirGL path does not invoke the instrumented X server GLX swap hook.
+  Coalesced X11 damage is therefore the first proven server-side frame
+  boundary and is used as a labeled fallback ordinal rather than pretending
+  GLX acceptance was observed.
+- A 10-second steady device capture recorded 19.569 produced FPS, 19.666
+  unique X11-source presentation events per second, zero source duplicates,
+  and zero timestamp-query or telemetry losses. All 183 redraws were
+  content-triggered. The same capture copied 4,215,569,904 bytes through the
+  X11 upload path and spent 480.123 ms of CPU time in those copies, with a
+  6.109 ms maximum copy. This establishes the full-frame X11 copy as a
+  high-priority measured seam while leaving canonical presented FPS
+  unavailable until producer correlation is complete.
+- The GLX acceptance hook remains absent, so accepted-to-damage latency is
+  explicitly unavailable rather than reported as a misleading zero. The
+  observed damage-to-redraw aggregate was 0.316 ms p50 and 0.522 ms maximum.
+- Startup samples proved that repeated source submissions do occur: their
+  redraw-reason masks identified cursor-only or mixed initialization work.
+  Raw EGL and compositor rates must never be used as gameplay FPS because
+  they can include repeated old content.
 
 ### Shared identity and clock contract
 

@@ -27,12 +27,36 @@ class PerfDashboard(
         val producedFpsStatus: String,
         val producerLastSeq: Long?,
         val xlorieConsumerRedrawRateHz: Double?,
+        val x11GlxSwapRequestRateHz: Double?,
+        val x11DamageRequestRateHz: Double?,
+        val xlorieSubmittedRateHz: Double?,
+        val displayPresentEventRateHz: Double?,
+        val uniqueSourceSubmitRateHz: Double?,
+        val uniqueSourcePresentRateHz: Double?,
+        val duplicateSourceSubmitCount: Long?,
+        val duplicateSourcePresentCount: Long?,
+        val presentationCapability: String,
+        val x11UploadCallRateHz: Double?,
+        val x11UploadBytes: Long?,
+        val x11UploadCopyMs: Double?,
         val waitChoreoPct: Double,
         val waitContentPct: Double,
         val waitStatePct: Double
     )
 
     @Volatile private var lastConsumerRedrawRateHz: Double? = null
+    @Volatile private var lastX11GlxSwapRequestRateHz: Double? = null
+    @Volatile private var lastX11DamageRequestRateHz: Double? = null
+    @Volatile private var lastXlorieSubmittedRateHz: Double? = null
+    @Volatile private var lastDisplayPresentEventRateHz: Double? = null
+    @Volatile private var lastUniqueSourceSubmitRateHz: Double? = null
+    @Volatile private var lastUniqueSourcePresentRateHz: Double? = null
+    @Volatile private var lastDuplicateSourceSubmitCount: Long? = null
+    @Volatile private var lastDuplicateSourcePresentCount: Long? = null
+    @Volatile private var lastPresentationCapability: String = "unavailable"
+    @Volatile private var lastX11UploadCallRateHz: Double? = null
+    @Volatile private var lastX11UploadBytes: Long? = null
+    @Volatile private var lastX11UploadCopyMs: Double? = null
     @Volatile private var lastWaitChoreoPct: Double = 0.0
     @Volatile private var lastWaitContentPct: Double = 0.0
     @Volatile private var lastWaitStatePct: Double = 0.0
@@ -51,12 +75,45 @@ class PerfDashboard(
         lastWaitStatePct = statePct
     }
 
+    fun updateX11StageRates(stats: X11StageRates) {
+        lastX11GlxSwapRequestRateHz = stats.glxSwapRequestRateHz
+        lastX11DamageRequestRateHz = stats.damageRequestRateHz
+    }
+
+    fun updatePresentationStats(stats: PresentationStats) {
+        lastXlorieSubmittedRateHz = stats.submittedRateHz
+        lastDisplayPresentEventRateHz = stats.displayPresentEventRateHz
+        lastUniqueSourceSubmitRateHz = stats.uniqueSourceSubmitRateHz
+        lastUniqueSourcePresentRateHz = stats.uniqueSourcePresentRateHz
+        lastDuplicateSourceSubmitCount = stats.duplicateSourceSubmitCount
+        lastDuplicateSourcePresentCount = stats.duplicateSourcePresentCount
+        lastPresentationCapability = stats.capability
+    }
+
+    fun updateCopyStats(stats: CopyStats) {
+        lastX11UploadCallRateHz = stats.uploadCallRateHz
+        lastX11UploadBytes = stats.uploadBytes
+        lastX11UploadCopyMs = stats.uploadCopyNs / 1_000_000.0
+    }
+
     fun updateProducerStats(sample: ProducerRateTracker.Sample): ProducerRateTracker.UpdateOutcome =
         producerRateTracker.update(sample)
 
     fun resetFrameMetrics() {
         producerRateTracker.reset()
         lastConsumerRedrawRateHz = null
+        lastX11GlxSwapRequestRateHz = null
+        lastX11DamageRequestRateHz = null
+        lastXlorieSubmittedRateHz = null
+        lastDisplayPresentEventRateHz = null
+        lastUniqueSourceSubmitRateHz = null
+        lastUniqueSourcePresentRateHz = null
+        lastDuplicateSourceSubmitCount = null
+        lastDuplicateSourcePresentCount = null
+        lastPresentationCapability = "unavailable"
+        lastX11UploadCallRateHz = null
+        lastX11UploadBytes = null
+        lastX11UploadCopyMs = null
         lastWaitChoreoPct = 0.0
         lastWaitContentPct = 0.0
         lastWaitStatePct = 0.0
@@ -94,6 +151,18 @@ class PerfDashboard(
             producer.status,
             producer.lastSeq,
             lastConsumerRedrawRateHz,
+            lastX11GlxSwapRequestRateHz,
+            lastX11DamageRequestRateHz,
+            lastXlorieSubmittedRateHz,
+            lastDisplayPresentEventRateHz,
+            lastUniqueSourceSubmitRateHz,
+            lastUniqueSourcePresentRateHz,
+            lastDuplicateSourceSubmitCount,
+            lastDuplicateSourcePresentCount,
+            lastPresentationCapability,
+            lastX11UploadCallRateHz,
+            lastX11UploadBytes,
+            lastX11UploadCopyMs,
             lastWaitChoreoPct, lastWaitContentPct, lastWaitStatePct
         )
 
@@ -116,6 +185,13 @@ class PerfDashboard(
         val consumerRate = summary.xlorieConsumerRedrawRateHz
             ?.let { "%.1f".format(Locale.ROOT, it) }
             ?: "unavailable"
+        fun rate(value: Double?): String =
+            value?.let { "%.3f".format(Locale.ROOT, it) } ?: "unavailable"
+        val uploadBytes = summary.x11UploadBytes?.toString() ?: "unavailable"
+        val uploadCopyMs =
+            summary.x11UploadCopyMs?.let { "%.3f".format(Locale.ROOT, it) } ?: "unavailable"
+        val duplicateSubmitCount = summary.duplicateSourceSubmitCount?.toString() ?: "unavailable"
+        val duplicatePresentCount = summary.duplicateSourcePresentCount?.toString() ?: "unavailable"
         logger.perf(
             "PERF_SUMMARY: $affinityParts $overheadParts" +
                 " produced_fps=$producedValue" +
@@ -124,6 +200,18 @@ class PerfDashboard(
                 " accepted_fps=unavailable submitted_fps=unavailable presented_fps=unavailable" +
                 " presentation_status=unavailable_no_correlated_presentation_events" +
                 " xlorie_consumer_redraw_rate_hz=$consumerRate" +
+                " x11_glx_swap_request_rate_hz=${rate(summary.x11GlxSwapRequestRateHz)}" +
+                " x11_damage_request_rate_hz=${rate(summary.x11DamageRequestRateHz)}" +
+                " xlorie_submitted_rate_hz=${rate(summary.xlorieSubmittedRateHz)}" +
+                " display_present_event_rate_hz=${rate(summary.displayPresentEventRateHz)}" +
+                " unique_source_submit_rate_hz=${rate(summary.uniqueSourceSubmitRateHz)}" +
+                " unique_source_present_rate_hz=${rate(summary.uniqueSourcePresentRateHz)}" +
+                " duplicate_source_submit_count=$duplicateSubmitCount" +
+                " duplicate_source_present_count=$duplicatePresentCount" +
+                " presentation_capability=${summary.presentationCapability}" +
+                " x11_upload_call_rate_hz=${rate(summary.x11UploadCallRateHz)}" +
+                " x11_upload_bytes=$uploadBytes" +
+                " x11_upload_copy_ms=$uploadCopyMs" +
                 " wait_choreo_pct=%.0f".format(Locale.ROOT, summary.waitChoreoPct) +
                 " wait_content_pct=%.0f".format(Locale.ROOT, summary.waitContentPct) +
                 " wait_state_pct=%.0f".format(Locale.ROOT, summary.waitStatePct)
@@ -143,6 +231,56 @@ class PerfDashboard(
             } else {
                 ConsumerStats(consumerRedrawRateHz, 0.0, 0.0, 0.0)
             }
+        }
+
+        fun parseXlorieStageRatesLine(line: String): X11StageRates? {
+            if (
+                !line.contains("XlorieStageRatesV1:") &&
+                !line.contains("XlorieServerSnapshotV1:")
+            ) return null
+            val glxRate =
+                extractField(line, "x11_glx_swap_request_rate_hz")?.toDoubleOrNull() ?: return null
+            val damageRate =
+                extractField(line, "x11_damage_request_rate_hz")?.toDoubleOrNull() ?: return null
+            return X11StageRates(glxRate, damageRate)
+        }
+
+        fun parseXloriePresentationLine(line: String): PresentationStats? {
+            if (!line.contains("XloriePresentationV1:")) return null
+            val capability = extractField(line, "capability") ?: return null
+            val submittedRate =
+                extractField(line, "xlorie_submitted_rate_hz")?.toDoubleOrNull() ?: return null
+            val presentRate =
+                extractField(line, "display_present_event_rate_hz")?.toDoubleOrNull() ?: return null
+            val uniqueSubmitRate =
+                extractField(line, "unique_source_submit_rate_hz")?.toDoubleOrNull() ?: return null
+            val uniquePresentRate =
+                extractField(line, "unique_source_present_rate_hz")?.toDoubleOrNull() ?: return null
+            val duplicateSubmitCount =
+                extractField(line, "duplicate_source_submit_count")?.toLongOrNull() ?: return null
+            val duplicatePresentCount =
+                extractField(line, "duplicate_source_present_count")?.toLongOrNull() ?: return null
+            return PresentationStats(
+                capability,
+                submittedRate,
+                presentRate,
+                uniqueSubmitRate,
+                uniquePresentRate,
+                duplicateSubmitCount,
+                duplicatePresentCount
+            )
+        }
+
+        fun parseXlorieCopyStatsLine(line: String): CopyStats? {
+            if (
+                !line.contains("XlorieCopyStatsV1:") &&
+                !line.contains("XlorieServerSnapshotV1:")
+            ) return null
+            val callRate =
+                extractField(line, "upload_call_rate_hz")?.toDoubleOrNull() ?: return null
+            val bytes = extractField(line, "upload_bytes")?.toLongOrNull() ?: return null
+            val copyNs = extractField(line, "upload_copy_ns")?.toLongOrNull() ?: return null
+            return CopyStats(callRate, bytes, copyNs)
         }
 
         private fun extractField(line: String, key: String): String? {
@@ -168,5 +306,26 @@ class PerfDashboard(
         val choreoPct: Double,
         val contentPct: Double,
         val statePct: Double
+    )
+
+    data class X11StageRates(
+        val glxSwapRequestRateHz: Double,
+        val damageRequestRateHz: Double
+    )
+
+    data class PresentationStats(
+        val capability: String,
+        val submittedRateHz: Double,
+        val displayPresentEventRateHz: Double,
+        val uniqueSourceSubmitRateHz: Double,
+        val uniqueSourcePresentRateHz: Double,
+        val duplicateSourceSubmitCount: Long,
+        val duplicateSourcePresentCount: Long
+    )
+
+    data class CopyStats(
+        val uploadCallRateHz: Double,
+        val uploadBytes: Long,
+        val uploadCopyNs: Long
     )
 }
