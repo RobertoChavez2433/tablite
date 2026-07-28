@@ -18,6 +18,7 @@
 
 #include <jni.h>
 #include <android/hardware_buffer.h>
+#include <android/hardware_buffer_jni.h>
 #include <android/log.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
@@ -29,6 +30,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <pthread.h>
+#include <poll.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -51,6 +53,77 @@
 
 #define POOL_SIZE_DEFAULT 3
 #define BLIT_LOG_PERIOD 60   /* periodic blit summary every N frames */
+
+JNIEXPORT jboolean JNICALL
+Java_com_runelitetablet_directsurface_HardwareBufferPatternWriter_nativeFill(
+        JNIEnv *env, jclass clazz, jobject hardware_buffer, jint slot, jint generation) {
+    (void) clazz;
+    if (!hardware_buffer) {
+        return JNI_FALSE;
+    }
+    AHardwareBuffer *buffer = AHardwareBuffer_fromHardwareBuffer(env, hardware_buffer);
+    if (!buffer) {
+        return JNI_FALSE;
+    }
+    AHardwareBuffer_Desc desc;
+    AHardwareBuffer_describe(buffer, &desc);
+    if (desc.format != AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM || desc.layers != 1) {
+        LOGE("patternFill unsupported format=%u layers=%u", desc.format, desc.layers);
+        return JNI_FALSE;
+    }
+
+    void *pixels = NULL;
+    int result = AHardwareBuffer_lock(
+        buffer,
+        AHARDWAREBUFFER_USAGE_CPU_WRITE_RARELY,
+        -1,
+        NULL,
+        &pixels);
+    if (result != 0 || !pixels) {
+        LOGE("patternFill lock failed result=%d", result);
+        return JNI_FALSE;
+    }
+
+    static const uint8_t colors[3][3] = {
+        {214, 176, 57},
+        {78, 163, 223},
+        {191, 80, 120},
+    };
+    const uint8_t *base = colors[((unsigned int) slot) % 3u];
+    for (uint32_t y = 0; y < desc.height; y++) {
+        uint8_t *row = (uint8_t *) pixels + ((size_t) y * desc.stride * 4u);
+        for (uint32_t x = 0; x < desc.width; x++) {
+            const bool checker = (((x / 96u) + (y / 96u) + (uint32_t) generation) & 1u) != 0u;
+            const uint8_t delta = checker ? 32u : 0u;
+            row[x * 4u + 0u] = (uint8_t) (base[0] > delta ? base[0] - delta : 0u);
+            row[x * 4u + 1u] = (uint8_t) (base[1] > delta ? base[1] - delta : 0u);
+            row[x * 4u + 2u] = (uint8_t) (base[2] > delta ? base[2] - delta : 0u);
+            row[x * 4u + 3u] = 255u;
+        }
+    }
+
+    int fence_fd = -1;
+    result = AHardwareBuffer_unlock(buffer, &fence_fd);
+    if (result != 0) {
+        LOGE("patternFill unlock failed result=%d", result);
+        if (fence_fd >= 0) close(fence_fd);
+        return JNI_FALSE;
+    }
+    if (fence_fd >= 0) {
+        struct pollfd poll_fd = {
+            .fd = fence_fd,
+            .events = POLLIN,
+            .revents = 0,
+        };
+        result = poll(&poll_fd, 1, 1000);
+        close(fence_fd);
+        if (result <= 0) {
+            LOGE("patternFill unlock fence wait failed result=%d errno=%d", result, errno);
+            return JNI_FALSE;
+        }
+    }
+    return JNI_TRUE;
+}
 
 static int count_open_fds(void) {
     DIR *d = opendir("/proc/self/fd");

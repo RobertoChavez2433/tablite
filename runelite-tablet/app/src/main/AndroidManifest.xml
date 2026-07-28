@@ -47,7 +47,7 @@
 
         <activity
             android:name=".presentation.DirectSurfaceProbeActivity"
-            android:exported="false"
+            android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
 
         <!-- S82 task #26 — Surface-AIDL handoff de-risker. Activity hosts a
