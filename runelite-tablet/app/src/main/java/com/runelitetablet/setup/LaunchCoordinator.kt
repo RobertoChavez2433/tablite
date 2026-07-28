@@ -5,6 +5,7 @@ import android.content.Intent
 import com.runelitetablet.auth.AuthResult
 import com.runelitetablet.domain.logging.CorrelationId
 import com.runelitetablet.auth.LaunchEnvDeployer
+import com.runelitetablet.telemetry.RendererBackend
 import com.runelitetablet.auth.SessionValidation
 import com.runelitetablet.auth.JagexOAuth2Manager
 import com.runelitetablet.domain.auth.CredentialStore
@@ -16,8 +17,7 @@ import com.runelitetablet.directsurface.DirectSurfaceControlServer
 import com.runelitetablet.presentation.PresentationBackend
 import com.runelitetablet.session.RuneLiteSessionService
 import com.runelitetablet.session.SessionState
-import com.runelitetablet.telemetry.CaptureSessionRegistry
-import com.runelitetablet.telemetry.TelemetryExporter
+import com.runelitetablet.telemetry.CaptureController
 import com.runelitetablet.telemetry.TelemetryMode
 import com.runelitetablet.ui.DisplayPreferences
 import com.runelitetablet.ui.LaunchPreferences
@@ -45,6 +45,7 @@ class LaunchCoordinator(
     private val displayPreferences: DisplayPreferences,
     private val launchPreferences: LaunchPreferences,
     private val presentationBackend: PresentationBackend,
+    private val captureController: CaptureController,
     private val authCoordinator: AuthCoordinator,
     private val scope: CoroutineScope,
     private val logger: Logger? = null,
@@ -132,8 +133,34 @@ class LaunchCoordinator(
             }
         }
         _launchState.value = LaunchState.Launching
-        val useNative = launchPreferences.useNativeTermux
-        if (useNative) {
+        val requestedUseNative = launchPreferences.useNativeTermux
+        val nativeRepositoryReady = if (requestedUseNative) {
+            isNativeRepositoryReady()
+        } else {
+            false
+        }
+        val launchRoute = selectLaunchRoute(
+            requestedUseNative = requestedUseNative,
+            nativeRepositoryReady = nativeRepositoryReady,
+            requestedBackend = launchPreferences.rendererBackend
+        )
+        if (requestedUseNative && !launchRoute.useNative) {
+            logger?.state(
+                "LaunchCoordinator: native repository refresh required; using one official proot launcher run " +
+                    "without modifying or automating RuneLite",
+                correlationId = correlationId
+            )
+            if (!ensureOfficialLauncherJava(correlationId)) {
+                logger?.e(
+                    "LAUNCH",
+                    "LaunchCoordinator: Java 21 prerequisite refresh failed; official RuneLite launcher cannot run",
+                    correlationId = correlationId
+                )
+                _launchState.value = LaunchState.Failed("Failed to install Java 21 for the official RuneLite refresh")
+                return
+            }
+        }
+        if (launchRoute.useNative) {
             logger?.state("LaunchCoordinator: native-Termux mode enabled, deploying Bionic rlawt jar", correlationId = correlationId)
             if (!scriptDeployer.deployJars()) {
                 logger?.e("LAUNCH", "LaunchCoordinator: deployJars failed — cannot run native path without bionic rlawt jar", correlationId = correlationId)
@@ -141,11 +168,20 @@ class LaunchCoordinator(
                 return
             }
         }
-        logger?.state("LaunchCoordinator: deploying env file backend=${presentationBackend.id} useNative=$useNative", correlationId = correlationId)
+        logger?.state(
+            "LaunchCoordinator: deploying env file backend=${presentationBackend.id} " +
+                "useNative=${launchRoute.useNative} renderer=${launchRoute.rendererBackend.envValue}",
+            correlationId = correlationId
+        )
         val envFilePath = LaunchEnvDeployer.deployToTermuxHome(credentialStore, commandRunner)
         logger?.state("LaunchCoordinator: envFilePath=$envFilePath hasEnvFile=${envFilePath != null}", correlationId = correlationId)
         logger?.d("LAUNCH", "LaunchCoordinator: env contents=[tokens redacted] backend=${presentationBackend.id}", correlationId = correlationId)
-        val success = launchInternal(envFilePath, correlationId, useNative)
+        val success = launchInternal(
+            envFilePath = envFilePath,
+            correlationId = correlationId,
+            useNative = launchRoute.useNative,
+            rendererBackend = launchRoute.rendererBackend
+        )
         if (success) {
             logger?.state("LaunchCoordinator: launch succeeded, starting session service", correlationId = correlationId)
             _launchState.value = LaunchState.Idle
@@ -156,21 +192,24 @@ class LaunchCoordinator(
         }
     }
 
-    private suspend fun launchInternal(envFilePath: String? = null, correlationId: String? = null, useNative: Boolean = false): Boolean {
+    private suspend fun launchInternal(
+        envFilePath: String? = null,
+        correlationId: String? = null,
+        useNative: Boolean = false,
+        rendererBackend: RendererBackend = launchPreferences.rendererBackend
+    ): Boolean {
         if (!presentationBackend.isInstalled(packageChecker)) {
             logger?.w("LAUNCH", "launchInternal: backend ${presentationBackend.id} not installed", correlationId = correlationId)
             return false
         }
         presentationBackend.applyLaunchPreferences(context, displayPreferences)
-        val rendererBackend = launchPreferences.rendererBackend
         val telemetryMode = launchPreferences.telemetryMode
         val targetHz = launchPreferences.targetHz
-        val captureSession = CaptureSessionRegistry.start(
+        val captureSession = captureController.start(
             backend = rendererBackend,
             telemetryMode = telemetryMode,
             targetHz = targetHz
         )
-        TelemetryExporter.start(context.applicationContext, captureSession)
         val capture = captureSession.manifest
         val useDirectSurface = rendererBackend == com.runelitetablet.telemetry.RendererBackend.DIRECT_VIRGL_AHB ||
             rendererBackend == com.runelitetablet.telemetry.RendererBackend.DIRECT_ZINK_AHB
@@ -302,6 +341,68 @@ class LaunchCoordinator(
         else commandRunner.execute(commandPath = scriptDeployer.getScriptPath("update-runelite.sh"), background = true, timeoutMs = 60_000L).stdout ?: ""
     } catch (e: TimeoutCancellationException) { "" } catch (e: CancellationException) { throw e } catch (_: Exception) { "" }
 
+    private suspend fun isNativeRepositoryReady(): Boolean = try {
+        val command = """
+            REPO="${CommandRunner.TERMUX_BIN_PATH.removeSuffix("/bin")}/var/lib/proot-distro/installed-rootfs/ubuntu/root/.runelite/repository2"
+            REFRESH="${CommandRunner.TERMUX_HOME_PATH}/.runelite-tablet/markers/runelite-refresh-required"
+            if [ ! -f "${'$'}REFRESH" ] &&
+                [ -d "${'$'}REPO" ] &&
+                find "${'$'}REPO" -maxdepth 1 -type f -name '*.jar' -print -quit | grep -q .
+            then
+                echo READY
+            else
+                echo REFRESH_REQUIRED
+            fi
+        """.trimIndent()
+        val result = commandRunner.execute(
+            commandPath = "${CommandRunner.TERMUX_BIN_PATH}/bash",
+            arguments = arrayOf("-c", command),
+            background = true,
+            timeoutMs = CommandRunner.TIMEOUT_VERIFY_MS
+        )
+        result.isSuccess && result.stdout?.lineSequence()?.any { it == "READY" } == true
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        false
+    }
+
+    private suspend fun ensureOfficialLauncherJava(correlationId: String?): Boolean = try {
+        if (!scriptDeployer.deployScripts()) {
+            false
+        } else {
+            logger?.state(
+                "LaunchCoordinator: verifying Java 21 prerequisite for official launcher recovery",
+                correlationId = correlationId
+            )
+            val result = commandRunner.execute(
+                commandPath = scriptDeployer.getScriptPath("install-java.sh"),
+                background = true,
+                timeoutMs = CommandRunner.DEFAULT_TIMEOUT_MS
+            )
+            val completed = result.stdout?.contains("=== install-java.sh complete ===") == true
+            if (!result.isSuccess || !completed) {
+                logger?.e(
+                    "LAUNCH",
+                    "LaunchCoordinator: Java 21 prerequisite failed exitCode=${result.exitCode} " +
+                        "stderr=${result.stderr?.take(300)}",
+                    correlationId = correlationId
+                )
+            }
+            result.isSuccess && completed
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        logger?.e(
+            "LAUNCH",
+            "LaunchCoordinator: Java 21 prerequisite threw ${e.javaClass.simpleName}",
+            throwable = e,
+            correlationId = correlationId
+        )
+        false
+    }
+
     private fun parseUpdateOutput(output: String) {
         val statusLine = output.lines().lastOrNull { it.startsWith("UPDATE_STATUS") } ?: ""
         if (statusLine.contains("downloading")) {
@@ -383,4 +484,26 @@ class LaunchCoordinator(
         val sidebarReserve = 273
         return (frameWidth - sidebarReserve) to frameHeight
     }
+}
+
+internal data class LaunchRoute(
+    val useNative: Boolean,
+    val rendererBackend: RendererBackend
+)
+
+internal fun selectLaunchRoute(
+    requestedUseNative: Boolean,
+    nativeRepositoryReady: Boolean,
+    requestedBackend: RendererBackend
+): LaunchRoute {
+    if (requestedUseNative && nativeRepositoryReady) {
+        return LaunchRoute(useNative = true, rendererBackend = requestedBackend)
+    }
+
+    val fallbackBackend = if (requestedBackend == RendererBackend.SOFTWARE_X11) {
+        RendererBackend.SOFTWARE_X11
+    } else {
+        RendererBackend.PROOT_X11_VIRGL
+    }
+    return LaunchRoute(useNative = false, rendererBackend = fallbackBackend)
 }

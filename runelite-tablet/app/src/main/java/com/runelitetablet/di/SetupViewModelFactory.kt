@@ -1,4 +1,4 @@
-package com.runelitetablet.setup
+package com.runelitetablet.di
 
 import android.app.Activity
 import android.content.Context
@@ -6,6 +6,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import com.runelitetablet.RuneLiteTabletApp
 import com.runelitetablet.logging.AppLog
+import com.runelitetablet.setup.AppScreen
+import com.runelitetablet.setup.AuthCoordinator
+import com.runelitetablet.setup.LaunchCoordinator
+import com.runelitetablet.setup.SetupViewModel
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.flow.MutableStateFlow
 
@@ -45,6 +49,7 @@ class SetupViewModelFactory(activity: Activity) : ViewModelProvider.Factory {
             displayPreferences = container.displayPreferences,
             launchPreferences = container.launchPreferences,
             presentationBackend = container.presentationBackend,
+            captureController = container.captureController,
             authCoordinator = authCoordinator,
             scope = MainScope(),
             logger = logger

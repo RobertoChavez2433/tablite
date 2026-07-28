@@ -18,6 +18,7 @@
 #include <android/log.h>
 #include <media/NdkImageReader.h>
 #include <dlfcn.h>
+#include <inttypes.h>
 #include <sys/mman.h>
 #include <time.h>
 #include "list.h"
@@ -150,8 +151,8 @@ static struct {
 
 static struct {
     uint64_t windowStartNs;
-    uint64_t lastFrameStartNs;
-    uint64_t frameCount;
+    uint64_t lastRedrawStartNs;
+    uint64_t consumerRedrawCount;
     uint64_t totalLockNs;
     uint64_t totalFenceNs;
     uint64_t totalSwapNs;
@@ -162,8 +163,8 @@ static struct {
     uint64_t maxSwapNs;
     uint64_t maxFrameNs;
     uint64_t maxInterFrameNs;
-    uint64_t contentStarved;    // vsync wakeups with no new content (drawRequested=false)
-    uint64_t vsyncWakeups;      // total vsync wakeups (content + starved)
+    uint64_t wakeupsWithoutRedraw; // renderer wakeups with no new content
+    uint64_t rendererWakeups;      // renderer wakeups (content + no redraw)
     uint64_t waitChoreographerNs; // time blocked by waitForNextFrame
     uint64_t waitContentNs;       // time blocked waiting for drawRequested
     uint64_t waitStateNs;         // time blocked on state/window/buffer changes
@@ -202,59 +203,59 @@ WaitReason classifyWaitReason(bool hasState, bool surfaceAvailable, bool waitFor
     return WAIT_NONE;
 }
 
-static void rendererLogPerfSample(uint64_t frameStartNs, uint64_t lockNs, uint64_t fenceNs, uint64_t swapNs, uint64_t frameNs) {
-    uint64_t interFrameNs = 0;
+static void rendererLogRedrawPerfSample(uint64_t redrawStartNs, uint64_t lockNs, uint64_t fenceNs, uint64_t swapNs, uint64_t redrawNs) {
+    uint64_t interRedrawNs = 0;
     if (!rendererPerfStats.windowStartNs)
-        rendererPerfStats.windowStartNs = frameStartNs;
+        rendererPerfStats.windowStartNs = redrawStartNs;
 
-    if (rendererPerfStats.lastFrameStartNs)
-        interFrameNs = frameStartNs - rendererPerfStats.lastFrameStartNs;
-    rendererPerfStats.lastFrameStartNs = frameStartNs;
+    if (rendererPerfStats.lastRedrawStartNs)
+        interRedrawNs = redrawStartNs - rendererPerfStats.lastRedrawStartNs;
+    rendererPerfStats.lastRedrawStartNs = redrawStartNs;
 
-    rendererPerfStats.frameCount++;
+    rendererPerfStats.consumerRedrawCount++;
     rendererPerfStats.totalLockNs += lockNs;
     rendererPerfStats.totalFenceNs += fenceNs;
     rendererPerfStats.totalSwapNs += swapNs;
-    rendererPerfStats.totalFrameNs += frameNs;
+    rendererPerfStats.totalFrameNs += redrawNs;
     rendererPerfStats.maxLockNs = max(rendererPerfStats.maxLockNs, lockNs);
     rendererPerfStats.maxFenceNs = max(rendererPerfStats.maxFenceNs, fenceNs);
     rendererPerfStats.maxSwapNs = max(rendererPerfStats.maxSwapNs, swapNs);
-    rendererPerfStats.maxFrameNs = max(rendererPerfStats.maxFrameNs, frameNs);
+    rendererPerfStats.maxFrameNs = max(rendererPerfStats.maxFrameNs, redrawNs);
 
-    if (interFrameNs > 0) {
-        rendererPerfStats.totalInterFrameNs += interFrameNs;
-        rendererPerfStats.maxInterFrameNs = max(rendererPerfStats.maxInterFrameNs, interFrameNs);
+    if (interRedrawNs > 0) {
+        rendererPerfStats.totalInterFrameNs += interRedrawNs;
+        rendererPerfStats.maxInterFrameNs = max(rendererPerfStats.maxInterFrameNs, interRedrawNs);
     }
 
-    if ((frameStartNs - rendererPerfStats.windowStartNs) < 1000000000ULL)
+    if ((redrawStartNs - rendererPerfStats.windowStartNs) < 1000000000ULL)
         return;
 
-    double frameCount = (double) rendererPerfStats.frameCount;
-    double intervalCount = rendererPerfStats.frameCount > 1 ? (double) (rendererPerfStats.frameCount - 1) : 0.0;
-    double avgLockMs = rendererPerfStats.totalLockNs / 1000000.0 / frameCount;
-    double avgFenceMs = rendererPerfStats.totalFenceNs / 1000000.0 / frameCount;
-    double avgSwapMs = rendererPerfStats.totalSwapNs / 1000000.0 / frameCount;
-    double avgFrameMs = rendererPerfStats.totalFrameNs / 1000000.0 / frameCount;
-    double avgInterFrameMs = intervalCount > 0.0 ? (rendererPerfStats.totalInterFrameNs / 1000000.0 / intervalCount) : 0.0;
-    double estimatedFps = avgInterFrameMs > 0.0 ? (1000.0 / avgInterFrameMs) : 0.0;
+    double redrawCount = (double) rendererPerfStats.consumerRedrawCount;
+    double intervalCount = rendererPerfStats.consumerRedrawCount > 1 ? (double) (rendererPerfStats.consumerRedrawCount - 1) : 0.0;
+    double avgLockMs = rendererPerfStats.totalLockNs / 1000000.0 / redrawCount;
+    double avgFenceMs = rendererPerfStats.totalFenceNs / 1000000.0 / redrawCount;
+    double avgSwapMs = rendererPerfStats.totalSwapNs / 1000000.0 / redrawCount;
+    double avgRedrawMs = rendererPerfStats.totalFrameNs / 1000000.0 / redrawCount;
+    double avgInterRedrawMs = intervalCount > 0.0 ? (rendererPerfStats.totalInterFrameNs / 1000000.0 / intervalCount) : 0.0;
+    double consumerRedrawFps = avgInterRedrawMs > 0.0 ? (1000.0 / avgInterRedrawMs) : 0.0;
 
-    double contentUtil = rendererPerfStats.vsyncWakeups > 0
-        ? (100.0 * rendererPerfStats.frameCount / rendererPerfStats.vsyncWakeups)
+    double redrawWakeUtil = rendererPerfStats.rendererWakeups > 0
+        ? (100.0 * rendererPerfStats.consumerRedrawCount / rendererPerfStats.rendererWakeups)
         : 0.0;
     double waitChoreoMs = rendererPerfStats.waitChoreographerNs / 1000000.0;
     double waitContentMs = rendererPerfStats.waitContentNs / 1000000.0;
     double waitStateMs = rendererPerfStats.waitStateNs / 1000000.0;
 
     log(
-        "XloriePerf: frames=%llu avg_lock_ms=%.3f avg_fence_ms=%.3f avg_swap_ms=%.3f avg_frame_ms=%.3f avg_inter_frame_ms=%.3f estimated_fps=%.1f"
-        " content_util=%.0f%% starved=%llu vsyncs=%llu"
-        " max_lock_ms=%.3f max_fence_ms=%.3f max_swap_ms=%.3f max_frame_ms=%.3f max_inter_frame_ms=%.3f"
+        "XloriePerf: consumer_redraws=%llu avg_lock_ms=%.3f avg_fence_ms=%.3f avg_swap_ms=%.3f avg_redraw_ms=%.3f avg_inter_redraw_ms=%.3f consumer_redraw_fps=%.1f"
+        " redraw_wake_util=%.0f%% wakeups_without_redraw=%llu renderer_wakeups=%llu"
+        " max_lock_ms=%.3f max_fence_ms=%.3f max_swap_ms=%.3f max_redraw_ms=%.3f max_inter_redraw_ms=%.3f"
         " wait_choreo=%.1fms wait_content=%.1fms wait_state=%.1fms",
-        (unsigned long long) rendererPerfStats.frameCount,
-        avgLockMs, avgFenceMs, avgSwapMs, avgFrameMs, avgInterFrameMs, estimatedFps,
-        contentUtil,
-        (unsigned long long) rendererPerfStats.contentStarved,
-        (unsigned long long) rendererPerfStats.vsyncWakeups,
+        (unsigned long long) rendererPerfStats.consumerRedrawCount,
+        avgLockMs, avgFenceMs, avgSwapMs, avgRedrawMs, avgInterRedrawMs, consumerRedrawFps,
+        redrawWakeUtil,
+        (unsigned long long) rendererPerfStats.wakeupsWithoutRedraw,
+        (unsigned long long) rendererPerfStats.rendererWakeups,
         rendererPerfStats.maxLockNs / 1000000.0,
         rendererPerfStats.maxFenceNs / 1000000.0,
         rendererPerfStats.maxSwapNs / 1000000.0,
@@ -263,8 +264,8 @@ static void rendererLogPerfSample(uint64_t frameStartNs, uint64_t lockNs, uint64
         waitChoreoMs, waitContentMs, waitStateMs
     );
 
-    rendererPerfStats.windowStartNs = frameStartNs;
-    rendererPerfStats.frameCount = 0;
+    rendererPerfStats.windowStartNs = redrawStartNs;
+    rendererPerfStats.consumerRedrawCount = 0;
     rendererPerfStats.totalLockNs = 0;
     rendererPerfStats.totalFenceNs = 0;
     rendererPerfStats.totalSwapNs = 0;
@@ -274,8 +275,8 @@ static void rendererLogPerfSample(uint64_t frameStartNs, uint64_t lockNs, uint64
     rendererPerfStats.maxFenceNs = 0;
     rendererPerfStats.maxSwapNs = 0;
     rendererPerfStats.maxFrameNs = 0;
-    rendererPerfStats.contentStarved = 0;
-    rendererPerfStats.vsyncWakeups = 0;
+    rendererPerfStats.wakeupsWithoutRedraw = 0;
+    rendererPerfStats.rendererWakeups = 0;
     rendererPerfStats.maxInterFrameNs = 0;
     rendererPerfStats.waitChoreographerNs = 0;
     rendererPerfStats.waitContentNs = 0;
@@ -772,7 +773,7 @@ void rendererRedrawLocked(bool* waitingForBuffers) {
         *waitingForBuffers = true;
     pthread_spin_unlock(&bufferLock);
     if (!buffer) {
-        log("Buffer %llu not found", state->rootWindowTextureID);
+        log("Buffer %" PRIu64 " not found", state->rootWindowTextureID);
         return;
     }
 
@@ -824,7 +825,7 @@ void rendererRedrawLocked(bool* waitingForBuffers) {
 
     state->renderedFrames++;
     frameEndNs = rendererNowNs();
-    rendererLogPerfSample(frameStartNs, lockNs, fenceNs, swapNs, frameEndNs - frameStartNs);
+    rendererLogRedrawPerfSample(frameStartNs, lockNs, fenceNs, swapNs, frameEndNs - frameStartNs);
 }
 
 static inline __always_inline bool rendererShouldWait(bool *waitingForBuffers) {
@@ -925,11 +926,11 @@ __noreturn static void* rendererThread(void) {
         pthread_mutex_unlock(&stateLock);
 
         if (state && state->surfaceAvailable && !state->waitForNextFrame) {
-            rendererPerfStats.vsyncWakeups++;
+            rendererPerfStats.rendererWakeups++;
             if (state->drawRequested || state->cursor.moved || state->cursor.updated)
                 rendererRedrawLocked(&waitingForBuffers);
             else
-                rendererPerfStats.contentStarved++;
+                rendererPerfStats.wakeupsWithoutRedraw++;
         }
 
         pthread_spin_lock(&bufferLock);

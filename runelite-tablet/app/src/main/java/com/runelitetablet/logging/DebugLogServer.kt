@@ -1,8 +1,7 @@
 package com.runelitetablet.logging
 
 import android.util.Log
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import com.runelitetablet.domain.process.LineProcessLauncher
 import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
@@ -20,7 +19,10 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * Lifecycle: start() in DEBUG builds, stop() on app destroy. No global state.
  */
-class DebugLogServer(private val port: Int = DEFAULT_PORT) {
+class DebugLogServer(
+    private val lineProcessLauncher: LineProcessLauncher,
+    private val port: Int = DEFAULT_PORT,
+) {
     private val running = AtomicBoolean(false)
     private var serverSocket: ServerSocket? = null
     private var acceptThread: Thread? = null
@@ -189,29 +191,29 @@ class DebugLogServer(private val port: Int = DEFAULT_PORT) {
 
     private fun logcatBridge() {
         try {
-            val process = Runtime.getRuntime().exec(arrayOf(
+            val process = lineProcessLauncher.launch(listOf(
                 "logcat", "-v", "threadtime", "-s",
                 "LorieNative:V", "gles-renderer:V", "XlorieCaps:V", "Xlorie:V",
                 "RlawtSurface:V", "DirectSurface:V", "RLClient:V"
             ))
-            val reader = BufferedReader(InputStreamReader(process.inputStream))
-            while (running.get()) {
-                val line = reader.readLine() ?: break
-                val msg = parseLogcatMessage(line)
-                val tag = parseLogcatTag(line)
-                // RuneLite client.log lines arrive via launch-runelite.sh tailing into
-                // `log -t RLClient`. Route them under source="runelite" so the HTML
-                // viewer shows them as a distinct filter group.
-                val source = if (tag.startsWith("RL")) "runelite" else "native"
-                val json = buildLogJson(
-                    level = parseLogcatLevel(line), tag = tag,
-                    msg = msg, thread = parseLogcatThread(line),
-                    source = source, file = "", lineNum = 0, correlationId = null
-                )
-                broadcast(json)
-                if (msg.contains("XloriePerf:")) nativeLogListener?.invoke(msg)
+            process.use {
+                while (running.get()) {
+                    val line = process.readLine() ?: break
+                    val msg = parseLogcatMessage(line)
+                    val tag = parseLogcatTag(line)
+                    // RuneLite client.log lines arrive via launch-runelite.sh tailing into
+                    // `log -t RLClient`. Route them under source="runelite" so the HTML
+                    // viewer shows them as a distinct filter group.
+                    val source = if (tag.startsWith("RL")) "runelite" else "native"
+                    val json = buildLogJson(
+                        level = parseLogcatLevel(line), tag = tag,
+                        msg = msg, thread = parseLogcatThread(line),
+                        source = source, file = "", lineNum = 0, correlationId = null
+                    )
+                    broadcast(json)
+                    if (msg.contains("XloriePerf:")) nativeLogListener?.invoke(msg)
+                }
             }
-            process.destroy()
         } catch (e: Exception) {
             if (running.get()) Log.w(TAG, "Logcat bridge error: ${e.message}")
         }

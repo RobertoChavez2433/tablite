@@ -40,7 +40,7 @@ stop_pid() {
     fi
     echo "Stopping $label (PID $pid)..."
     kill "$pid" 2>/dev/null || true
-    for i in $(seq 1 50); do
+    for _ in {1..50}; do
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.1
     done

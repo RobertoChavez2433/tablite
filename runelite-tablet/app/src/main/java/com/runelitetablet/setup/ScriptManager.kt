@@ -2,23 +2,23 @@ package com.runelitetablet.setup
 
 import android.content.Context
 import com.runelitetablet.BuildConfig
+import com.runelitetablet.domain.command.CommandRunner
 import com.runelitetablet.domain.setup.ScriptDeployer
 import com.runelitetablet.logging.AppLog
-import com.runelitetablet.termux.TermuxCommandRunner
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 class ScriptManager(
     private val context: Context,
-    private val commandRunner: TermuxCommandRunner,
+    private val commandRunner: CommandRunner,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : ScriptDeployer {
 
     companion object {
-        private const val SCRIPTS_DIR = "${TermuxCommandRunner.TERMUX_HOME_PATH}/scripts"
-        private const val CONFIGS_DIR = "${TermuxCommandRunner.TERMUX_HOME_PATH}/scripts/configs"
-        private const val JARS_DIR = "${TermuxCommandRunner.TERMUX_HOME_PATH}/.rlt"
+        private const val SCRIPTS_DIR = "${CommandRunner.TERMUX_HOME_PATH}/scripts"
+        private const val CONFIGS_DIR = "${CommandRunner.TERMUX_HOME_PATH}/scripts/configs"
+        private const val JARS_DIR = "${CommandRunner.TERMUX_HOME_PATH}/.rlt"
         private const val VERSION_MARKER = "$JARS_DIR/deployed-version"
         private val SCRIPT_NAMES = listOf(
             "install-proot.sh", "install-java.sh", "download-runelite.sh",
@@ -74,10 +74,10 @@ class ScriptManager(
     private suspend fun ensureMarkerChecked() {
         if (deviceMarkerChecked) return
         val result = commandRunner.execute(
-            commandPath = "${TermuxCommandRunner.TERMUX_BIN_PATH}/bash",
+            commandPath = "${CommandRunner.TERMUX_BIN_PATH}/bash",
             arguments = arrayOf("-c", "cat $VERSION_MARKER 2>/dev/null || echo MISSING"),
             background = true,
-            timeoutMs = TermuxCommandRunner.TIMEOUT_VERIFY_MS
+            timeoutMs = CommandRunner.TIMEOUT_VERIFY_MS
         )
         val marker = result.stdout?.trim().orEmpty()
         val onDeviceVersion = marker.toIntOrNull() ?: -1
@@ -107,10 +107,10 @@ class ScriptManager(
             jarsDeployedVersion == currentVersion) {
             val cmd = "mkdir -p $JARS_DIR && printf '%s' $currentVersion > $VERSION_MARKER"
             commandRunner.execute(
-                commandPath = "${TermuxCommandRunner.TERMUX_BIN_PATH}/bash",
+                commandPath = "${CommandRunner.TERMUX_BIN_PATH}/bash",
                 arguments = arrayOf("-c", cmd),
                 background = true,
-                timeoutMs = TermuxCommandRunner.TIMEOUT_VERIFY_MS
+                timeoutMs = CommandRunner.TIMEOUT_VERIFY_MS
             )
             AppLog.script("maybeWriteVersionMarker: marker written version=$currentVersion")
         }
@@ -181,10 +181,10 @@ class ScriptManager(
         AppLog.script("deployScriptsBatched: ${scripts.size} scripts, ${totalBytes} bytes total")
 
         val result = commandRunner.execute(
-            commandPath = "${TermuxCommandRunner.TERMUX_BIN_PATH}/bash",
+            commandPath = "${CommandRunner.TERMUX_BIN_PATH}/bash",
             arguments = arrayOf("-c", sb.toString()),
             background = true,
-            timeoutMs = TermuxCommandRunner.TIMEOUT_VERIFY_MS
+            timeoutMs = CommandRunner.TIMEOUT_VERIFY_MS
         )
         val durationMs = System.currentTimeMillis() - startMs
 
@@ -265,10 +265,10 @@ class ScriptManager(
 
         val deployStartMs = System.currentTimeMillis()
         val result = commandRunner.execute(
-            commandPath = "${TermuxCommandRunner.TERMUX_BIN_PATH}/bash",
+            commandPath = "${CommandRunner.TERMUX_BIN_PATH}/bash",
             arguments = arrayOf("-c", deployCommand),
             background = true,
-            timeoutMs = TermuxCommandRunner.TIMEOUT_VERIFY_MS
+            timeoutMs = CommandRunner.TIMEOUT_VERIFY_MS
         )
         val deployDurationMs = System.currentTimeMillis() - deployStartMs
 
@@ -312,11 +312,11 @@ class ScriptManager(
 
         val deployStartMs = System.currentTimeMillis()
         val result = commandRunner.execute(
-            commandPath = "${TermuxCommandRunner.TERMUX_BIN_PATH}/bash",
+            commandPath = "${CommandRunner.TERMUX_BIN_PATH}/bash",
             arguments = arrayOf("-c", deployCommand),
             stdin = scriptContent,
             background = true,
-            timeoutMs = TermuxCommandRunner.TIMEOUT_VERIFY_MS
+            timeoutMs = CommandRunner.TIMEOUT_VERIFY_MS
         )
         val deployDurationMs = System.currentTimeMillis() - deployStartMs
 
@@ -353,11 +353,11 @@ class ScriptManager(
 
         val deployStartMs = System.currentTimeMillis()
         val result = commandRunner.execute(
-            commandPath = "${TermuxCommandRunner.TERMUX_BIN_PATH}/bash",
+            commandPath = "${CommandRunner.TERMUX_BIN_PATH}/bash",
             arguments = arrayOf("-c", deployCommand),
             stdin = configContent,
             background = true,
-            timeoutMs = TermuxCommandRunner.TIMEOUT_VERIFY_MS
+            timeoutMs = CommandRunner.TIMEOUT_VERIFY_MS
         )
         val deployDurationMs = System.currentTimeMillis() - deployStartMs
 

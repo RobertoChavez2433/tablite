@@ -3,6 +3,8 @@ package com.runelitetablet.logging
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.runelitetablet.domain.process.LineProcess
+import com.runelitetablet.domain.process.LineProcessLauncher
 
 /**
  * Verifies the logcat bridge captures all X server diagnostic tags,
@@ -33,10 +35,17 @@ class XServerLogBridgeTest {
 
     @Test
     fun `buildLogJson includes native source for X server logs`() {
-        val server = DebugLogServer()
+        val server = DebugLogServer(
+            LineProcessLauncher {
+                object : LineProcess {
+                    override fun readLine(): String? = null
+                    override fun close() = Unit
+                }
+            }
+        )
         val json = server.buildLogJson(
             level = "D", tag = "XloriePerf",
-            msg = "frames=42 estimated_fps=42.0 wait_choreo=120.5ms",
+            msg = "consumer_redraws=42 consumer_redraw_fps=42.0 wait_choreo=120.5ms",
             thread = "28764", source = "native",
             file = "", lineNum = 0, correlationId = null
         )

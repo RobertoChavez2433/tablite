@@ -65,9 +65,9 @@ class DebugLogServerTest {
 
     @Test
     fun `parseLogcatMessage extracts XloriePerf data`() {
-        val line = "04-14 17:46:01.234 23282 28764 D gles-renderer: XloriePerf avg_lock_ms=0.12 avg_fence_ms=0.05 avg_swap_ms=2.34 estimated_fps=54"
+        val line = "04-14 17:46:01.234 23282 28764 D gles-renderer: XloriePerf avg_lock_ms=0.12 avg_fence_ms=0.05 avg_swap_ms=2.34 consumer_redraw_fps=54"
         assertEquals(
-            "XloriePerf avg_lock_ms=0.12 avg_fence_ms=0.05 avg_swap_ms=2.34 estimated_fps=54",
+            "XloriePerf avg_lock_ms=0.12 avg_fence_ms=0.05 avg_swap_ms=2.34 consumer_redraw_fps=54",
             DebugLogServer.parseLogcatMessage(line)
         )
     }

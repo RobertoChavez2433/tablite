@@ -41,16 +41,16 @@ class PerfDashboardTest {
         ptraceReader.stats[100] = buildStatLine(100, "RuneLite", 5, 46, 54)
         ptraceReader.comms[100] = "RuneLite"
 
-        dashboard.updateRendererStats(42.0, 25.0, 60.0, 15.0)
+        dashboard.updateConsumerStats(42.0, 25.0, 60.0, 15.0)
         val summary = dashboard.collect(listOf(100))
 
         assertEquals(1, summary.affinities.size)
         assertEquals(1, summary.overheads.size)
-        assertEquals(42.0, summary.rendererFps, 0.01)
+        assertEquals(42.0, summary.consumerRedrawFps, 0.01)
 
         val perfLogs = logger.entriesWithTag("PERF")
         assertTrue(perfLogs.any { it.message.contains("PERF_SUMMARY:") })
-        assertTrue(perfLogs.any { it.message.contains("renderer_fps=42.0") })
+        assertTrue(perfLogs.any { it.message.contains("consumer_redraw_fps=42.0") })
     }
 
     @Test
@@ -62,10 +62,10 @@ class PerfDashboardTest {
 
     @Test
     fun `parseXloriePerfLine extracts renderer stats`() {
-        val line = "XloriePerf: frames=42 estimated_fps=42.0 wait_choreo=250.0ms wait_content=600.0ms wait_state=150.0ms"
+        val line = "XloriePerf: consumer_redraws=42 consumer_redraw_fps=42.0 wait_choreo=250.0ms wait_content=600.0ms wait_state=150.0ms"
         val stats = PerfDashboard.parseXloriePerfLine(line)
         assertNotNull(stats)
-        assertEquals(42.0, stats!!.fps, 0.01)
+        assertEquals(42.0, stats!!.consumerRedrawFps, 0.01)
         assertEquals(25.0, stats.choreoPct, 0.1) // 250/(250+600+150) = 25%
         assertEquals(60.0, stats.contentPct, 0.1) // 600/1000 = 60%
         assertEquals(15.0, stats.statePct, 0.1)   // 150/1000 = 15%
@@ -78,18 +78,18 @@ class PerfDashboardTest {
 
     @Test
     fun `parseXloriePerfLine handles zero wait times`() {
-        val line = "XloriePerf: frames=120 estimated_fps=120.0 wait_choreo=0.0ms wait_content=0.0ms wait_state=0.0ms"
+        val line = "XloriePerf: consumer_redraws=120 consumer_redraw_fps=120.0 wait_choreo=0.0ms wait_content=0.0ms wait_state=0.0ms"
         val stats = PerfDashboard.parseXloriePerfLine(line)
         assertNotNull(stats)
-        assertEquals(120.0, stats!!.fps, 0.01)
+        assertEquals(120.0, stats!!.consumerRedrawFps, 0.01)
         assertEquals(0.0, stats.choreoPct, 0.01)
     }
 
     @Test
-    fun `updateRendererStats reflected in next collect`() {
-        dashboard.updateRendererStats(90.0, 10.0, 80.0, 10.0)
+    fun `updateConsumerStats reflected in next collect`() {
+        dashboard.updateConsumerStats(90.0, 10.0, 80.0, 10.0)
         val summary = dashboard.collect(emptyList())
-        assertEquals(90.0, summary.rendererFps, 0.01)
+        assertEquals(90.0, summary.consumerRedrawFps, 0.01)
         assertEquals(10.0, summary.waitChoreoPct, 0.01)
         assertEquals(80.0, summary.waitContentPct, 0.01)
         assertEquals(10.0, summary.waitStatePct, 0.01)

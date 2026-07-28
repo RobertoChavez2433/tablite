@@ -25,14 +25,13 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import com.runelitetablet.domain.presentation.FrameTimingTracker
 import com.runelitetablet.BuildConfig
+import com.runelitetablet.RuneLiteTabletApp
 import com.runelitetablet.logging.AppLog
 import com.runelitetablet.logging.FdTracker
 import com.runelitetablet.logging.PerfSnapshots
 import com.runelitetablet.domain.command.CommandRunner
 import com.runelitetablet.perf.CpuBooster
 import com.runelitetablet.perf.PerfDashboard
-import com.runelitetablet.telemetry.CaptureSessionRegistry
-import com.runelitetablet.telemetry.TelemetryExporter
 import com.runelitetablet.telemetry.FrameEventType
 import com.runelitetablet.telemetry.FrameOutcome
 import com.runelitetablet.telemetry.FrameStage
@@ -46,6 +45,9 @@ import java.util.Locale
 import java.util.UUID
 
 class HybridX11HostActivity : ComponentActivity() {
+    private val captureController by lazy {
+        (application as RuneLiteTabletApp).container.captureController
+    }
     private lateinit var statusView: TextView
     private lateinit var lorieView: LorieView
     private lateinit var rootView: FrameLayout
@@ -65,8 +67,8 @@ class HybridX11HostActivity : ComponentActivity() {
     private var jankRegistrationAttempts = 0
     private val targetHz: Int by lazy { LaunchPreferences(this).targetHz }
     private val frameTracker: FrameTimingTracker by lazy { FrameTimingTracker(targetHz = targetHz) }
-    private var frameCount = 0L
-    private var lastFrameLogCount = 0L
+    private var hostVsyncCallbackCount = 0L
+    private var lastHostVsyncLogCount = 0L
     private var previousFrameTimeNanos = 0L
     private var frameSessionId: String? = null
     private val deadlineNs: Long by lazy { frameTracker.deadlineNs() + 100_000L }
@@ -74,7 +76,7 @@ class HybridX11HostActivity : ComponentActivity() {
         override fun doFrame(frameTimeNanos: Long) {
             val priorFrameTime = previousFrameTimeNanos
             val callbackMissed = priorFrameTime > 0 && frameTimeNanos - priorFrameTime > deadlineNs
-            CaptureSessionRegistry.active?.recorder?.record(
+            captureController.active?.recorder?.record(
                 threadId = Process.myTid(),
                 frameSeq = 0,
                 stage = FrameStage.HOST_VSYNC_CALLBACK,
@@ -85,14 +87,19 @@ class HybridX11HostActivity : ComponentActivity() {
                 threadCpuTimeNs = Debug.threadCpuTimeNanos()
             )
             frameTracker.recordFrame(frameTimeNanos)
-            frameCount++
-            if (BuildConfig.DEBUG && frameCount % 120 == 0L) {
-                AppLog.thread("Choreographer", Thread.currentThread().name, "doFrame", "frame=$frameCount")
+            hostVsyncCallbackCount++
+            if (BuildConfig.DEBUG && hostVsyncCallbackCount % 120 == 0L) {
+                AppLog.thread(
+                    "Choreographer",
+                    Thread.currentThread().name,
+                    "doFrame",
+                    "hostVsyncCallback=$hostVsyncCallbackCount"
+                )
             }
             val sessionId = frameSessionId
             // Log frame stats every 120 frames (~1 second at 120fps)
-            if (frameCount - lastFrameLogCount >= 120) {
-                lastFrameLogCount = frameCount
+            if (hostVsyncCallbackCount - lastHostVsyncLogCount >= 120) {
+                lastHostVsyncLogCount = hostVsyncCallbackCount
                 val fps = frameTracker.getAverageFps()
                 val missedDeadlines = frameTracker.getMissedDeadlineCount()
                 val p99 = frameTracker.getFrameTimePercentile(99.0)
@@ -136,7 +143,7 @@ class HybridX11HostActivity : ComponentActivity() {
         }
 
         jankRegistration = attachedSurface.registerOnJankDataListener(mainExecutor) { batch ->
-            val recorder = CaptureSessionRegistry.active?.recorder ?: return@registerOnJankDataListener
+            val recorder = captureController.active?.recorder ?: return@registerOnJankDataListener
             val threadId = Process.myTid()
             val threadCpuNs = Debug.threadCpuTimeNanos()
             batch.forEach { data ->
@@ -176,9 +183,12 @@ class HybridX11HostActivity : ComponentActivity() {
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
         // Also extend under display cutouts so we get those pixels too on notched displays.
-        @Suppress("DEPRECATION")
-        window.attributes = window.attributes.apply {
-            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            @Suppress("DEPRECATION")
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
         }
         @Suppress("DEPRECATION")
         window.attributes = window.attributes.apply { preferredRefreshRate = 120f }
@@ -197,7 +207,12 @@ class HybridX11HostActivity : ComponentActivity() {
         // Wire native XloriePerf stats into the perf dashboard
         container.debugLogServer?.nativeLogListener = { msg ->
             PerfDashboard.parseXloriePerfLine(msg)?.let { stats ->
-                perfDashboard?.updateRendererStats(stats.fps, stats.choreoPct, stats.contentPct, stats.statePct)
+                perfDashboard?.updateConsumerStats(
+                    stats.consumerRedrawFps,
+                    stats.choreoPct,
+                    stats.contentPct,
+                    stats.statePct
+                )
             }
         }
         AppLog.lifecycle("HybridX11HostActivity.onCreate")
@@ -206,7 +221,11 @@ class HybridX11HostActivity : ComponentActivity() {
         // look like, and whether the display is reporting DP or PX-scaled dimensions.
         val dm = resources.displayMetrics
         val flags = window.attributes.flags
-        val cutoutMode = window.attributes.layoutInDisplayCutoutMode
+        val cutoutMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes.layoutInDisplayCutoutMode
+        } else {
+            0
+        }
         AppLog.d(
             "WINDOW",
             "HybridX11HostActivity.onCreate: displayMetrics=${dm.widthPixels}x${dm.heightPixels}@${dm.density}x " +
@@ -218,8 +237,9 @@ class HybridX11HostActivity : ComponentActivity() {
         // panel would switch to under adaptive-refresh. Paired with LorieView's per-
         // surface DISPLAY log — compare the two to detect Activity-vs-Surface display
         // divergence (e.g. secondary/external displays).
-        val disp = display
-        if (disp != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        @Suppress("DEPRECATION")
+        val disp = windowManager.defaultDisplay
+        if (disp != null) {
             val activeMode = disp.mode
             val modes = disp.supportedModes.joinToString(";") {
                 "id=${it.modeId}:${it.physicalWidth}x${it.physicalHeight}@${"%.1f".format(it.refreshRate)}Hz"
@@ -233,7 +253,7 @@ class HybridX11HostActivity : ComponentActivity() {
                     "supportedModes=[$modes] displayId=${disp.displayId} state=${disp.state}"
             )
         } else {
-            AppLog.w("DISPLAY", "HybridX11HostActivity.onCreate: display unavailable or pre-API-23 — mode dump skipped")
+            AppLog.w("DISPLAY", "HybridX11HostActivity.onCreate: display unavailable — mode dump skipped")
         }
         window.decorView.setOnApplyWindowInsetsListener { v, insets ->
             // Log insets AFTER layout — systemBars should be 0/0/0/0 once the immersive
@@ -251,14 +271,13 @@ class HybridX11HostActivity : ComponentActivity() {
     }
 
     private fun ensureCaptureSession() {
-        if (CaptureSessionRegistry.active != null) return
+        if (captureController.active != null) return
         val preferences = LaunchPreferences(this)
-        val session = CaptureSessionRegistry.start(
+        val session = captureController.start(
             backend = preferences.rendererBackend,
             telemetryMode = preferences.telemetryMode,
             targetHz = preferences.targetHz
         )
-        TelemetryExporter.start(applicationContext, session)
         val capture = session.manifest
         AppLog.state(
             "CAPTURE-START runId=${capture.runId} backend=${capture.backend} mode=${capture.telemetryMode} " +
@@ -285,7 +304,8 @@ class HybridX11HostActivity : ComponentActivity() {
         inputController.install()
         lorieView.setCallback(object : LorieView.Callback {
             override fun changed(surfaceWidth: Int, surfaceHeight: Int, screenWidth: Int, screenHeight: Int) {
-                val framerate = display?.refreshRate?.toInt() ?: 120
+                @Suppress("DEPRECATION")
+                val framerate = windowManager.defaultDisplay?.refreshRate?.toInt() ?: 120
                 // WINDOW tag covers every window-geometry transition so we can diff expected
                 // vs actual at each launch. Previously only went into the TextView overlay,
                 // which made post-mortems on "why is the canvas 1480x924 instead of 2960x1848"
@@ -299,8 +319,8 @@ class HybridX11HostActivity : ComponentActivity() {
                     "LorieView.changed: surface=${surfaceWidth}x$surfaceHeight " +
                         "screen=${screenWidth}x$screenHeight refresh=${framerate}Hz " +
                         "displayMetrics=${physW}x${physH}@${density}x " +
-                        "(ratios: surface/display=${String.format("%.2f", surfaceWidth.toFloat() / physW)}x" +
-                        " screen/display=${String.format("%.2f", screenWidth.toFloat() / physW)}x)"
+                        "(ratios: surface/display=${String.format(Locale.ROOT, "%.2f", surfaceWidth.toFloat() / physW)}x" +
+                        " screen/display=${String.format(Locale.ROOT, "%.2f", screenWidth.toFloat() / physW)}x)"
                 )
                 if (screenWidth > 0 && screenHeight > 0) {
                     AppLog.ipc("send", "jni_sendWindowChange", 0, "width=$screenWidth height=$screenHeight framerate=$framerate")
@@ -391,8 +411,8 @@ class HybridX11HostActivity : ComponentActivity() {
         lifecycleActive = true
         frameSessionId = "frames-" + UUID.randomUUID().toString().take(4)
         frameTracker.reset()
-        frameCount = 0L
-        lastFrameLogCount = 0L
+        hostVsyncCallbackCount = 0L
+        lastHostVsyncLogCount = 0L
         previousFrameTimeNanos = 0L
         Choreographer.getInstance().postFrameCallback(frameCallback)
         if (Build.VERSION.SDK_INT >= 36) {

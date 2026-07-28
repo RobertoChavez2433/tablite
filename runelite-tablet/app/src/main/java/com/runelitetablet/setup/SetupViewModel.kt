@@ -67,6 +67,7 @@ class SetupViewModel(
     private val isRetrying = AtomicBoolean(false)
 
     fun getDisplayName(): String? = authCoordinator.getDisplayName()
+    fun recordUiAction(message: String) = logger?.ui(message)
     override fun onCleared() { super.onCleared(); authCoordinator.clearState() }
 
     fun startSetup() {

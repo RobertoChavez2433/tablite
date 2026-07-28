@@ -105,11 +105,11 @@ $missed = @($producerIntervalsNs | Where-Object { $_ -gt ($deadlineNs + 100000.0
 $stalls = @($producerIntervalsNs | Where-Object { $_ -gt 50000000.0 }).Count
 $missRate = if ($producerIntervalsNs.Count -gt 0) { 100.0 * $missed / $producerIntervalsNs.Count } else { $null }
 
-$xlorieFpsValues = New-Object System.Collections.Generic.List[double]
+$xlorieConsumerRedrawFpsValues = New-Object System.Collections.Generic.List[double]
 Get-ChildItem -LiteralPath $capturePath -Recurse -File -Include "*.log","*.txt" | ForEach-Object {
     Get-Content -LiteralPath $_.FullName -ErrorAction SilentlyContinue | ForEach-Object {
-        if ($_ -match "XloriePerf:.*estimated_fps=([0-9]+(?:\.[0-9]+)?)") {
-            $xlorieFpsValues.Add([double]::Parse(
+        if ($_ -match "XloriePerf:.*consumer_redraw_fps=([0-9]+(?:\.[0-9]+)?)") {
+            $xlorieConsumerRedrawFpsValues.Add([double]::Parse(
                 $Matches[1],
                 [System.Globalization.CultureInfo]::InvariantCulture
             ))
@@ -128,8 +128,8 @@ $summary = [ordered]@{
         submitted_fps = $null
         presented_fps = $null
         display_vsync_hz = $null
-        xlorie_estimated_fps = if ($xlorieFpsValues.Count -gt 0) {
-            ($xlorieFpsValues | Measure-Object -Average).Average
+        xlorie_consumer_redraw_fps = if ($xlorieConsumerRedrawFpsValues.Count -gt 0) {
+            ($xlorieConsumerRedrawFpsValues | Measure-Object -Average).Average
         } else { $null }
     }
     producer_interval_ms = Get-Stats @($producerIntervalsNs | ForEach-Object { $_ / 1000000.0 })

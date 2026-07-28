@@ -256,7 +256,7 @@ function Get-RuneliteEvidenceSummary {
     $redrawWakeupPattern = "LorieNative: redraw wakeups in 5\.0 seconds = ([0-9]+(?:\.[0-9]+)?) FPS"
     $damageRequestPattern = "LorieNative: damage-triggered redraws in 5\.0 seconds = ([0-9]+(?:\.[0-9]+)?) FPS"
     $presentAfterFlipPattern = "LorieNative: present after-flips in 5\.0 seconds = ([0-9]+(?:\.[0-9]+)?) FPS"
-    $rendererPerfPattern = "gles-renderer: XloriePerf: .*estimated_fps=([0-9]+(?:\.[0-9]+)?)"
+    $consumerRedrawPattern = "gles-renderer: XloriePerf: .*consumer_redraw_fps=([0-9]+(?:\.[0-9]+)?)"
 
     $lastBufferMatch = Get-LastRegexCapture -Lines $Lines -Pattern $bufferPattern
     $bufferValues = @(Get-RegexCaptureValues -Lines $Lines -Pattern $bufferPattern)
@@ -267,7 +267,7 @@ function Get-RuneliteEvidenceSummary {
     $damageRequestValues = @(Get-RegexCaptureValues -Lines $Lines -Pattern $damageRequestPattern)
     $presentAfterFlipValues = @(Get-RegexCaptureValues -Lines $Lines -Pattern $presentAfterFlipPattern)
     $lastRendererPerfLine = Get-LastMatchingLine -Lines $Lines -Pattern "gles-renderer: XloriePerf:"
-    $lastRendererPerfMatch = Get-LastRegexCapture -Lines $Lines -Pattern $rendererPerfPattern
+    $lastConsumerRedrawMatch = Get-LastRegexCapture -Lines $Lines -Pattern $consumerRedrawPattern
 
     return [pscustomobject]@{
         StateRunningSeen = $stateRunningSeen
@@ -308,7 +308,7 @@ function Get-RuneliteEvidenceSummary {
         PresentAfterFlipSampleCount = $presentAfterFlipValues.Count
         LastPresentAfterFlipFps = if ($presentAfterFlipValues.Count -gt 0) { $presentAfterFlipValues[-1] } else { $null }
         AveragePresentAfterFlipFps = if ($presentAfterFlipValues.Count -gt 0) { ($presentAfterFlipValues | Measure-Object -Average).Average } else { $null }
-        LastRendererPerfEstimatedFps = if ($lastRendererPerfMatch) { $lastRendererPerfMatch.Groups[1].Value } else { $null }
+        LastConsumerRedrawFps = if ($lastConsumerRedrawMatch) { $lastConsumerRedrawMatch.Groups[1].Value } else { $null }
         LastRendererPerfLine = $lastRendererPerfLine
     }
 }
@@ -456,7 +456,7 @@ $summaryLines = @(
     "present_after_flip_sample_count=$($summary.PresentAfterFlipSampleCount)"
     "last_present_after_flip_fps=$($summary.LastPresentAfterFlipFps)"
     "average_present_after_flip_fps=$($summary.AveragePresentAfterFlipFps)"
-    "last_renderer_perf_estimated_fps=$($summary.LastRendererPerfEstimatedFps)"
+    "last_xlorie_consumer_redraw_fps=$($summary.LastConsumerRedrawFps)"
     "last_renderer_perf_line=$($summary.LastRendererPerfLine)"
     "log_path=$logPath"
 )

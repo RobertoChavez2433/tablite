@@ -7,6 +7,7 @@ set -euo pipefail
 
 MARKER_DIR="$HOME/.runelite-tablet/markers"
 VERSION_FILE="$MARKER_DIR/runelite-version"
+REFRESH_REQUIRED_FILE="$MARKER_DIR/runelite-refresh-required"
 RUNELITE_DIR="/root/runelite"
 RUNELITE_JAR="$RUNELITE_DIR/RuneLite.jar"
 GITHUB_API_URL="https://api.github.com/repos/runelite/launcher/releases/latest"
@@ -93,11 +94,13 @@ DL_RESULT=$(proot-distro login ubuntu -- bash -c "
 if echo "$DL_RESULT" | grep -q "DOWNLOAD_OK"; then
     # Write new version to marker file
     echo "$LATEST_VERSION" > "$VERSION_FILE"
-    # Clean stale client jars so the updated launcher does a fresh bootstrap
-    proot-distro login ubuntu -- bash -c "
-        [ -d '/root/.runelite/repository2' ] && rm -rf '/root/.runelite/repository2' && \
-        echo 'Cleaned stale repository2/ for fresh launcher bootstrap'
-    " 2>/dev/null || true
+    # The native launcher cannot bootstrap repository2 itself. Preserve the
+    # last verified official artifacts and request one normal official-launcher
+    # run. That launcher updates, cleans, downloads, and hash-verifies
+    # repository2 before it starts the stock client. Deleting repository2 here
+    # used to leave the immediately-following native launch with no classpath.
+    printf '%s\n' "$LATEST_VERSION" > "$REFRESH_REQUIRED_FILE"
+    echo "Marked official client artifacts for launcher refresh"
     echo "UPDATE_STATUS updated $LATEST_VERSION"
 else
     echo "WARNING: Download or verification failed, keeping current version"

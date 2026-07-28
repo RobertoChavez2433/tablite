@@ -1,5 +1,7 @@
 # Screenshots and diagnostic dumps
 *.png
+__pycache__/
+*.pyc
 diag-output.txt
 glxinfo-full.txt
 /perf-captures/

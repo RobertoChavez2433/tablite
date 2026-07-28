@@ -2,6 +2,7 @@ package com.runelitetablet.presentation
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import com.runelitetablet.domain.installer.PackageChecker
 import com.runelitetablet.logging.AppLog
 import com.runelitetablet.ui.DisplayPreferences
@@ -20,15 +21,16 @@ object DirectSurfaceProbeBackend : PresentationBackend {
     }
 
     override fun isInstalled(packageChecker: PackageChecker): Boolean {
-        val result = true
+        val result = Build.VERSION.SDK_INT >= 35
         AppLog.d("PRESENTATION", "DirectSurfaceProbeBackend.isInstalled=$result " +
-            "(always true — no external package needed)")
+            "(requires public SurfaceControl buffer APIs on Android 15+)")
         return result
     }
 
     override fun applyLaunchPreferences(context: Context, displayPreferences: DisplayPreferences) = Unit
 
-    override fun createLaunchIntent(context: Context): Intent {
+    override fun createLaunchIntent(context: Context): Intent? {
+        if (Build.VERSION.SDK_INT < 35) return null
         AppLog.d("PRESENTATION", "DirectSurfaceProbeBackend.createLaunchIntent: " +
             "target=${DirectSurfaceProbeActivity::class.java.name}")
         return Intent(context, DirectSurfaceProbeActivity::class.java)

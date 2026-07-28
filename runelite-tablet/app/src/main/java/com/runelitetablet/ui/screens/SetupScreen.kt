@@ -39,7 +39,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.runelitetablet.logging.AppLog
 import com.runelitetablet.setup.AppScreen
 import com.runelitetablet.BuildConfig
 import com.runelitetablet.session.SessionState
@@ -68,18 +67,18 @@ fun SetupScreen(viewModel: SetupViewModel) {
         is AppScreen.Setup -> SetupWizardContent(viewModel)
         is AppScreen.Login -> LoginScreen(
             onLogin = {
-                AppLog.ui("SetupScreen: Login button clicked")
+                viewModel.recordUiAction("SetupScreen: Login button clicked")
                 viewModel.startLogin()
             },
             onSkip = {
-                AppLog.ui("SetupScreen: Skip login clicked")
+                viewModel.recordUiAction("SetupScreen: Skip login clicked")
                 viewModel.skipLogin()
             }
         )
         is AppScreen.CharacterSelect -> CharacterSelectScreen(
             characters = screen.characters,
             onCharacterSelected = { character ->
-                AppLog.ui("SetupScreen: character selected displayName=***")
+                viewModel.recordUiAction("SetupScreen: character selected displayName=***")
                 viewModel.onCharacterSelected(character)
             }
         )
@@ -90,38 +89,38 @@ fun SetupScreen(viewModel: SetupViewModel) {
             sessionState = sessionState,
             sessionStartTime = sessionStartTime,
             onLaunch = {
-                AppLog.ui("SetupScreen: Launch RuneLite button clicked")
+                viewModel.recordUiAction("SetupScreen: Launch RuneLite button clicked")
                 viewModel.launchRuneLite()
             },
             onSwitchToGame = {
-                AppLog.ui("SetupScreen: Switch to Game button clicked")
+                viewModel.recordUiAction("SetupScreen: Switch to Game button clicked")
                 viewModel.switchToGame()
             },
             onStopSession = {
-                AppLog.ui("SetupScreen: Stop Game button clicked")
+                viewModel.recordUiAction("SetupScreen: Stop Game button clicked")
                 viewModel.stopSession()
             },
             onOpenDirectSurfaceProbe = {
-                AppLog.ui("SetupScreen: Direct Surface Probe button clicked")
+                viewModel.recordUiAction("SetupScreen: Direct Surface Probe button clicked")
                 viewModel.openDirectSurfaceProbe()
             },
             onSettings = {
-                AppLog.ui("SetupScreen: Settings button clicked")
+                viewModel.recordUiAction("SetupScreen: Settings button clicked")
                 viewModel.navigateToSettings()
             },
             onViewLogs = {
-                AppLog.ui("SetupScreen: View Logs button clicked")
+                viewModel.recordUiAction("SetupScreen: View Logs button clicked")
                 viewModel.navigateToLogViewer()
             }
         )
         is AppScreen.AuthError -> AuthErrorScreen(
             message = screen.message,
             onRetry = {
-                AppLog.ui("SetupScreen: AuthError retry clicked")
+                viewModel.recordUiAction("SetupScreen: AuthError retry clicked")
                 viewModel.startLogin()
             },
             onSkip = {
-                AppLog.ui("SetupScreen: AuthError skip clicked")
+                viewModel.recordUiAction("SetupScreen: AuthError skip clicked")
                 viewModel.skipLogin()
             }
         )
@@ -129,29 +128,29 @@ fun SetupScreen(viewModel: SetupViewModel) {
             displayName = viewModel.getDisplayName(),
             appVersion = BuildConfig.VERSION_NAME,
             onSignOut = {
-                AppLog.ui("SetupScreen: Sign out clicked")
+                viewModel.recordUiAction("SetupScreen: Sign out clicked")
                 viewModel.signOut()
             },
             onResetSetup = {
-                AppLog.ui("SetupScreen: Reset setup clicked")
+                viewModel.recordUiAction("SetupScreen: Reset setup clicked")
                 viewModel.resetSetup()
             },
             onViewLogs = {
-                AppLog.ui("SetupScreen: View logs from settings clicked")
+                viewModel.recordUiAction("SetupScreen: View logs from settings clicked")
                 viewModel.navigateToLogViewer()
             },
             onOpenDirectSurfaceProbe = {
-                AppLog.ui("SetupScreen: Open direct surface probe clicked")
+                viewModel.recordUiAction("SetupScreen: Open direct surface probe clicked")
                 viewModel.openDirectSurfaceProbe()
             },
             onBack = {
-                AppLog.ui("SetupScreen: Settings back clicked")
+                viewModel.recordUiAction("SetupScreen: Settings back clicked")
                 viewModel.navigateBackToLaunch()
             }
         )
         is AppScreen.LogViewer -> LogViewerScreen(
             onBack = {
-                AppLog.ui("SetupScreen: LogViewer back clicked")
+                viewModel.recordUiAction("SetupScreen: LogViewer back clicked")
                 viewModel.navigateBackToLaunch()
             }
         )
@@ -162,11 +161,11 @@ fun SetupScreen(viewModel: SetupViewModel) {
         HealthCheckDialog(
             failures = showHealthDialog ?: emptyList(),
             onRunSetup = {
-                AppLog.ui("SetupScreen: Health dialog -> Run Setup")
+                viewModel.recordUiAction("SetupScreen: Health dialog -> Run Setup")
                 viewModel.runSetupForHealth()
             },
             onLaunchAnyway = {
-                AppLog.ui("SetupScreen: Health dialog -> Launch Anyway")
+                viewModel.recordUiAction("SetupScreen: Health dialog -> Launch Anyway")
                 viewModel.launchAnyway()
             },
             onDismiss = {
@@ -239,7 +238,7 @@ private fun SetupWizardContent(viewModel: SetupViewModel) {
             Row(modifier = Modifier.fillMaxWidth()) {
                 if (hasFailed && !isPermissionStepActive) {
                     OutlinedButton(onClick = {
-                        AppLog.ui("SetupWizardContent: Retry button clicked hasFailed=$hasFailed")
+                        viewModel.recordUiAction("SetupWizardContent: Retry button clicked hasFailed=$hasFailed")
                         viewModel.retry()
                     }) {
                         Text("Retry")
@@ -248,7 +247,7 @@ private fun SetupWizardContent(viewModel: SetupViewModel) {
                 Spacer(modifier = Modifier.weight(1f))
                 Button(
                     onClick = {
-                        AppLog.ui("SetupWizardContent: Launch RuneLite button clicked canLaunch=$canLaunch")
+                        viewModel.recordUiAction("SetupWizardContent: Launch RuneLite button clicked canLaunch=$canLaunch")
                         viewModel.launchRuneLite()
                     },
                     enabled = canLaunch
@@ -810,7 +809,7 @@ private fun PermissionPhaseContent(
 
                     Button(
                         onClick = {
-                            AppLog.ui("PermissionPhaseContent: Copy & Open Termux clicked")
+                            viewModel.recordUiAction("PermissionPhaseContent: Copy & Open Termux clicked")
                             viewModel.copyConfigAndOpenTermux()
                         },
                         modifier = Modifier.fillMaxWidth()
@@ -822,7 +821,7 @@ private fun PermissionPhaseContent(
 
                     OutlinedButton(
                         onClick = {
-                            AppLog.ui("PermissionPhaseContent: Done - Check Now clicked")
+                            viewModel.recordUiAction("PermissionPhaseContent: Done - Check Now clicked")
                             viewModel.checkPermissionPhase()
                         },
                         modifier = Modifier.fillMaxWidth(),
@@ -849,7 +848,7 @@ private fun PermissionPhaseContent(
                     Row(modifier = Modifier.fillMaxWidth()) {
                         Button(
                             onClick = {
-                                AppLog.ui("PermissionPhaseContent: Grant Permission clicked")
+                                viewModel.recordUiAction("PermissionPhaseContent: Grant Permission clicked")
                                 viewModel.checkPermissionPhase()
                             },
                             modifier = Modifier.fillMaxWidth()
@@ -876,7 +875,7 @@ private fun PermissionPhaseContent(
 
                     Button(
                         onClick = {
-                            AppLog.ui("PermissionPhaseContent: Allow Background clicked")
+                            viewModel.recordUiAction("PermissionPhaseContent: Allow Background clicked")
                             viewModel.requestBatteryOptimization()
                         },
                         modifier = Modifier.fillMaxWidth()
@@ -888,7 +887,7 @@ private fun PermissionPhaseContent(
 
                     TextButton(
                         onClick = {
-                            AppLog.ui("PermissionPhaseContent: Check battery optimization clicked")
+                            viewModel.recordUiAction("PermissionPhaseContent: Check battery optimization clicked")
                             viewModel.checkPermissionPhase()
                         },
                         modifier = Modifier.fillMaxWidth()

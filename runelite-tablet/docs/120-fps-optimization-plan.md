@@ -18,6 +18,14 @@ The first milestone targets the connected stock, unrooted Samsung Tab S10 Ultra/
 
 RuneLite’s client, gamepack, GPU plugin, and Java plugin code remain byte-identical to upstream. Changes are permitted in Tablite, rlawt native bridges, LWJGL native compatibility/loading, Mesa, VirGL, X11/Xlorie, and Android presentation.
 
+Before further runtime optimization, the project must pass the canonical
+architecture and lint gate documented in
+`docs/architecture/application-architecture.md`. Strong rules are enabled
+without a debt baseline, every exposed violation is fixed, and the analyzer
+must attribute each check's runtime while completing in less than 60 seconds.
+This prerequisite locks the DI, telemetry, frame-metric, process, source
+ownership, and RuneLite-integrity seams used by the remainder of this plan.
+
 The implementation begins with two parallel tracks:
 
 1. Build the end-to-end frame flight recorder and decompose the proven native-X11/VirGL path.

@@ -8,8 +8,7 @@ import android.os.IBinder
 import com.runelitetablet.RuneLiteTabletApp
 import com.runelitetablet.domain.command.CommandRunner
 import com.runelitetablet.logging.AppLog
-import com.runelitetablet.presentation.PresentationBackends
-import com.runelitetablet.termux.TermuxCommandRunner
+import com.runelitetablet.presentation.PresentationBackend
 import com.runelitetablet.termux.TermuxProcessPin
 import com.runelitetablet.setup.ScriptManager
 import kotlinx.coroutines.CancellationException
@@ -47,22 +46,24 @@ class RuneLiteSessionService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private lateinit var healthMonitor: SessionHealthMonitor
-    private lateinit var commandRunner: TermuxCommandRunner
+    private lateinit var commandRunner: CommandRunner
     private lateinit var scriptManager: ScriptManager
     private lateinit var prefs: SharedPreferences
     private lateinit var notificationHelper: SessionNotificationHelper
     private lateinit var termuxPin: TermuxProcessPin
-    private val presentationBackend = PresentationBackends.stable
+    private lateinit var presentationBackend: PresentationBackend
     private var pinRefreshJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
-        commandRunner = TermuxCommandRunner(applicationContext, (application as RuneLiteTabletApp).container.termux.resultRegistry)
-        scriptManager = ScriptManager(applicationContext, commandRunner)
+        val container = (application as RuneLiteTabletApp).container
+        commandRunner = container.termux.commandRunner
+        scriptManager = container.setup.scriptManager
+        presentationBackend = container.presentationBackend
         healthMonitor = SessionHealthMonitor(commandRunner, serviceScope)
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         notificationHelper = SessionNotificationHelper(this)
-        termuxPin = TermuxProcessPin(applicationContext)
+        termuxPin = container.createTermuxProcessPin()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

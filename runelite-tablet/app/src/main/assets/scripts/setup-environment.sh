@@ -146,7 +146,9 @@ proot-distro login ubuntu -- env DEBIAN_FRONTEND=noninteractive bash -s << 'JAVA
         sleep 5
         attempt=$((attempt + 1))
     done
-    apt-get install -y openjdk-11-jdk openbox wget ca-certificates
+    apt-get install -y openjdk-21-jdk openbox wget ca-certificates
+    update-alternatives --auto java
+    update-alternatives --auto javac
     # Verify Java installed in the same login — saves one full proot spawn
     if java -version 2>&1; then
         echo "=== Java install OK ==="

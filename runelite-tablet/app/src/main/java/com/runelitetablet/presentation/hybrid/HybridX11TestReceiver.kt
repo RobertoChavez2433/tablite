@@ -3,10 +3,9 @@ package com.runelitetablet.presentation.hybrid
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import com.runelitetablet.auth.CredentialManager
+import com.runelitetablet.RuneLiteTabletApp
 import com.runelitetablet.auth.LaunchEnvDeployer
 import com.runelitetablet.logging.AppLog
-import com.runelitetablet.setup.ScriptManager
 import com.runelitetablet.termux.TermuxCommandRunner
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -22,7 +21,8 @@ import kotlinx.coroutines.launch
 class HybridX11TestReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         val action = intent?.action ?: return
-        val runner = TermuxCommandRunner(context)
+        val container = (context.applicationContext as RuneLiteTabletApp).container
+        val runner = container.termux.commandRunner
         val overridePackage = intent?.getStringExtra(EXTRA_OVERRIDE_PACKAGE)?.trim().orEmpty()
         val stopExistingX11 = """
             for proc in /proc/[0-9]*; do
@@ -237,7 +237,7 @@ class HybridX11TestReceiver : BroadcastReceiver() {
                             intent.getStringExtra(EXTRA_VIRGL_SERVER_PROFILE)?.trim().orEmpty()
                         val runeliteLaunchModeOverride =
                             intent.getStringExtra(EXTRA_RUNELITE_LAUNCH_MODE)?.trim().orEmpty()
-                        val scriptManager = ScriptManager(context, runner)
+                        val scriptManager = container.setup.scriptManager
                         val deployed = scriptManager.deployScripts()
                         if (!deployed) {
                             AppLog.e("HYBRID_X11", "HybridX11TestReceiver: failed to deploy scripts for real launcher test")
@@ -264,7 +264,7 @@ class HybridX11TestReceiver : BroadcastReceiver() {
                             launchArguments += listOf("--runelite-launch-mode", runeliteLaunchModeOverride)
                         }
                         val envFilePath = LaunchEnvDeployer.deployToTermuxHome(
-                            credentialStore = CredentialManager(context),
+                            credentialStore = container.auth.credentialStore,
                             commandRunner = runner
                         )
                         if (envFilePath != null) {
@@ -352,7 +352,7 @@ class HybridX11TestReceiver : BroadcastReceiver() {
                 val pendingResult = goAsync()
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
-                        val scriptManager = ScriptManager(context, runner)
+                        val scriptManager = container.setup.scriptManager
                         val deployed = scriptManager.deployScripts()
                         if (!deployed) {
                             AppLog.e("HYBRID_X11", "HybridX11TestReceiver: failed to deploy scripts for shutdown test")

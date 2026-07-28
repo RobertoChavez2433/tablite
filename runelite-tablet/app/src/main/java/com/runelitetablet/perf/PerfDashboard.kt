@@ -5,6 +5,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.Locale
 
 /**
  * Aggregates metrics from all Phase 0 components and emits periodic PERF_SUMMARY
@@ -20,13 +21,13 @@ class PerfDashboard(
     data class Summary(
         val affinities: List<CpuAffinityMonitor.ProcessAffinity>,
         val overheads: List<PtraceOverheadEstimator.OverheadSample>,
-        val rendererFps: Double,
+        val consumerRedrawFps: Double,
         val waitChoreoPct: Double,
         val waitContentPct: Double,
         val waitStatePct: Double
     )
 
-    @Volatile private var lastRendererFps: Double = 0.0
+    @Volatile private var lastConsumerRedrawFps: Double = 0.0
     @Volatile private var lastWaitChoreoPct: Double = 0.0
     @Volatile private var lastWaitContentPct: Double = 0.0
     @Volatile private var lastWaitStatePct: Double = 0.0
@@ -38,8 +39,8 @@ class PerfDashboard(
     }
     private var scheduledTask: ScheduledFuture<*>? = null
 
-    fun updateRendererStats(fps: Double, choreoPct: Double, contentPct: Double, statePct: Double) {
-        lastRendererFps = fps
+    fun updateConsumerStats(consumerRedrawFps: Double, choreoPct: Double, contentPct: Double, statePct: Double) {
+        lastConsumerRedrawFps = consumerRedrawFps
         lastWaitChoreoPct = choreoPct
         lastWaitContentPct = contentPct
         lastWaitStatePct = statePct
@@ -70,7 +71,7 @@ class PerfDashboard(
         val overheads = ptraceEstimator.sample(pids)
 
         val summary = Summary(
-            affinities, overheads, lastRendererFps,
+            affinities, overheads, lastConsumerRedrawFps,
             lastWaitChoreoPct, lastWaitContentPct, lastWaitStatePct
         )
 
@@ -86,28 +87,28 @@ class PerfDashboard(
         }
         val overheadParts = summary.overheads.joinToString(" ") { o ->
             val prefix = fixedPrefix(o.name)
-            "${prefix}kernel_ratio=%.2f".format(o.kernelRatio)
+            "${prefix}kernel_ratio=%.2f".format(Locale.ROOT, o.kernelRatio)
         }
         logger.perf(
             "PERF_SUMMARY: $affinityParts $overheadParts" +
-                " renderer_fps=%.1f".format(summary.rendererFps) +
-                " wait_choreo_pct=%.0f".format(summary.waitChoreoPct) +
-                " wait_content_pct=%.0f".format(summary.waitContentPct) +
-                " wait_state_pct=%.0f".format(summary.waitStatePct)
+                " consumer_redraw_fps=%.1f".format(Locale.ROOT, summary.consumerRedrawFps) +
+                " wait_choreo_pct=%.0f".format(Locale.ROOT, summary.waitChoreoPct) +
+                " wait_content_pct=%.0f".format(Locale.ROOT, summary.waitContentPct) +
+                " wait_state_pct=%.0f".format(Locale.ROOT, summary.waitStatePct)
         )
     }
 
     companion object {
-        fun parseXloriePerfLine(line: String): RendererStats? {
-            val fps = extractField(line, "estimated_fps")?.toDoubleOrNull() ?: return null
+        fun parseXloriePerfLine(line: String): ConsumerStats? {
+            val consumerRedrawFps = extractField(line, "consumer_redraw_fps")?.toDoubleOrNull() ?: return null
             val choreoMs = extractField(line, "wait_choreo")?.removeSuffix("ms")?.toDoubleOrNull() ?: 0.0
             val contentMs = extractField(line, "wait_content")?.removeSuffix("ms")?.toDoubleOrNull() ?: 0.0
             val stateMs = extractField(line, "wait_state")?.removeSuffix("ms")?.toDoubleOrNull() ?: 0.0
             val totalWaitMs = choreoMs + contentMs + stateMs
             return if (totalWaitMs > 0) {
-                RendererStats(fps, 100.0 * choreoMs / totalWaitMs, 100.0 * contentMs / totalWaitMs, 100.0 * stateMs / totalWaitMs)
+                ConsumerStats(consumerRedrawFps, 100.0 * choreoMs / totalWaitMs, 100.0 * contentMs / totalWaitMs, 100.0 * stateMs / totalWaitMs)
             } else {
-                RendererStats(fps, 0.0, 0.0, 0.0)
+                ConsumerStats(consumerRedrawFps, 0.0, 0.0, 0.0)
             }
         }
 
@@ -129,5 +130,10 @@ class PerfDashboard(
         }
     }
 
-    data class RendererStats(val fps: Double, val choreoPct: Double, val contentPct: Double, val statePct: Double)
+    data class ConsumerStats(
+        val consumerRedrawFps: Double,
+        val choreoPct: Double,
+        val contentPct: Double,
+        val statePct: Double
+    )
 }

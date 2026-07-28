@@ -11,11 +11,14 @@ import com.runelitetablet.setup.MarkerReconciler
 import com.runelitetablet.setup.SetupOrchestrator
 import com.runelitetablet.setup.SetupStepRunner
 import com.runelitetablet.setup.SetupVerifier
+import com.runelitetablet.setup.selectLaunchRoute
+import com.runelitetablet.telemetry.RendererBackend
 import com.runelitetablet.auth.JagexOAuth2Manager
 import com.runelitetablet.domain.command.CommandResult
 import com.runelitetablet.testutil.FakeCleaner
 import com.runelitetablet.testutil.FakeCommandRunner
 import com.runelitetablet.testutil.FakeCredentialStore
+import com.runelitetablet.testutil.FakeCaptureController
 import com.runelitetablet.testutil.FakePackageChecker
 import com.runelitetablet.testutil.FakePermissionChecker
 import com.runelitetablet.testutil.FakeScriptDeployer
@@ -93,6 +96,7 @@ class LaunchCoordinatorTest {
             displayPreferences = UnsafeHelper.allocate(DisplayPreferences::class.java),
             launchPreferences = UnsafeHelper.allocate(com.runelitetablet.ui.LaunchPreferences::class.java),
             presentationBackend = com.runelitetablet.presentation.PresentationBackends.stable,
+            captureController = FakeCaptureController(),
             authCoordinator = authCoordinator,
             scope = TestScope(testDispatcher),
             logger = logger, ioDispatcher = testDispatcher
@@ -133,5 +137,41 @@ class LaunchCoordinatorTest {
         credentialStore.storeTokens("access", null, System.currentTimeMillis() / 1000 - 100)
         val result = authCoordinator.refreshIfNeeded()
         assertTrue(result is AuthResult.NeedsLogin)
+    }
+
+    @Test
+    fun `native route remains native when official repository is ready`() {
+        val route = selectLaunchRoute(
+            requestedUseNative = true,
+            nativeRepositoryReady = true,
+            requestedBackend = RendererBackend.NATIVE_X11_VIRGL
+        )
+
+        assertTrue(route.useNative)
+        assertEquals(RendererBackend.NATIVE_X11_VIRGL, route.rendererBackend)
+    }
+
+    @Test
+    fun `missing native repository selects labeled proot recovery route`() {
+        val route = selectLaunchRoute(
+            requestedUseNative = true,
+            nativeRepositoryReady = false,
+            requestedBackend = RendererBackend.NATIVE_X11_VIRGL
+        )
+
+        assertFalse(route.useNative)
+        assertEquals(RendererBackend.PROOT_X11_VIRGL, route.rendererBackend)
+    }
+
+    @Test
+    fun `legacy proot preference is not mislabeled as native telemetry`() {
+        val route = selectLaunchRoute(
+            requestedUseNative = false,
+            nativeRepositoryReady = false,
+            requestedBackend = RendererBackend.NATIVE_X11_VIRGL
+        )
+
+        assertFalse(route.useNative)
+        assertEquals(RendererBackend.PROOT_X11_VIRGL, route.rendererBackend)
     }
 }

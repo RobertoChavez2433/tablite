@@ -45,6 +45,9 @@ rlt_log_cpuset "launch-script-entry" "$$"
 INTERNAL_X11_LOGFILE="$HOME/internal-x11-start.log"
 TERMUX_RUNELITE_SETTINGS_DIR="$HOME/.runelite"
 TERMUX_DIRECT_CLASSPATH_FILE="$TERMUX_RUNELITE_SETTINGS_DIR/direct-classpath.txt"
+RUNELITE_TABLET_MARKER_DIR="$HOME/.runelite-tablet/markers"
+RUNELITE_REFRESH_REQUIRED_FILE="$RUNELITE_TABLET_MARKER_DIR/runelite-refresh-required"
+RUNELITE_ARTIFACT_HASH_FILE="$HOME/.runelite-tablet/official-artifacts.sha256"
 PERF_MONITOR_ENABLED="${RLT_ENABLE_PERF_MONITOR:-0}"
 LAUNCH_LOCK_DIR="$PREFIX/tmp/.rlt-launch.lock"
 LAUNCH_LOCK_PID_FILE="$LAUNCH_LOCK_DIR/pid"
@@ -71,6 +74,7 @@ RUNELITE_LAUNCH_MODE_OVERRIDE=""
 X11_PID=""
 PERF_MONITOR_PID=""
 RL_LOG_TAIL_PID=""
+OFFICIAL_ARTIFACT_WATCHDOG_PID=""
 mkdir -p "$TERMUX_RUNELITE_SETTINGS_DIR"
 echo "=== RuneLite launch $(date) ===" | tee -a "$LOGFILE"
 printf '%s\n' \
@@ -367,6 +371,8 @@ cleanup_on_exit() {
     [ -n "${AFFINITY_MONITOR_PID:-}" ] && kill "$AFFINITY_MONITOR_PID" 2>/dev/null
     # Kill RuneLite client.log tail (feeds DebugLogServer via logcat tag RLClient)
     [ -n "${RL_LOG_TAIL_PID:-}" ] && kill "$RL_LOG_TAIL_PID" 2>/dev/null
+    [ -n "${OFFICIAL_ARTIFACT_WATCHDOG_PID:-}" ] &&
+        kill "$OFFICIAL_ARTIFACT_WATCHDOG_PID" 2>/dev/null
 
     # Kill Java/RuneLite
     pkill -f 'net.runelite.client.RuneLite' 2>/dev/null || true
@@ -441,15 +447,6 @@ if [ -f "$STICKY_AHB_SENTINEL" ]; then
 else
     export RLT_STICKY_AHB_LOCK=0
     echo "STICKY-AHB: disabled (sentinel $STICKY_AHB_SENTINEL absent, upstream unlock/relock preserved)" | tee -a "$LOGFILE"
-fi
-
-# FPS probe sentinel companion: $HOME/.rlt-fps-probe enables the FpsPlugin
-# overlay + unlocks gpu.fpsTarget/fpscontrol.maxFps per RL profile. Matches
-# the existing RLT_DEBUG_FPS_PROBE=1 gate below (session 71).
-FPS_PROBE_SENTINEL="$HOME/.rlt-fps-probe"
-if [ -f "$FPS_PROBE_SENTINEL" ]; then
-    export RLT_DEBUG_FPS_PROBE=1
-    echo "FPS-PROBE: enabled via sentinel $FPS_PROBE_SENTINEL" | tee -a "$LOGFILE"
 fi
 
 mkdir -p "$X11_SOCKET_DIR"
@@ -663,7 +660,6 @@ elif [ "$GPU_VENDOR" = "mali" ]; then
 
         # Wait for server to be ready (PID alive AND socket exists)
         VIRGL_READY=false
-        VIRGL_PROBE_START=$(date +%s%3N 2>/dev/null || date +%s)
         for i in $(seq 1 30); do
             ALIVE=$(kill -0 $VIRGL_PID 2>/dev/null && echo "yes" || echo "no")
             SOCKET_EXISTS=$([ -S "$VIRGL_SOCKET" ] && echo "yes" || echo "no")
@@ -772,7 +768,6 @@ fi
 # ── Phase 1: CPU core affinity pinning ──
 # Pin VirGL server to big/prime cores (CPU 4-7, bitmask 0xF0)
 BIG_PRIME_MASK="0xF0"
-PRIME_MASK="0x80"  # CPU 7 only (prime, 3.4 GHz)
 
 if [ -n "$VIRGL_PID" ]; then
     if taskset -p "$BIG_PRIME_MASK" "$VIRGL_PID" 2>/dev/null; then
@@ -955,46 +950,11 @@ echo ready > "$SESSION_DIR_IN_PROOT/display.ready"
 
 GC_LOG_FLAGS="-Xlog:gc*:file=/root/runelite/gc.log:time,uptime,level,tags:filecount=2,filesize=5M"
 RUNELITE_SETTINGS_DIR="/root/.runelite"
-RUNELITE_SETTINGS_FILE="$RUNELITE_SETTINGS_DIR/settings.properties"
 mkdir -p "$RUNELITE_SETTINGS_DIR"
-touch "$RUNELITE_SETTINGS_FILE"
 MESA_PROFILE="${RLT_INNER_MESA_PROFILE:-${MESA_PROFILE_OVERRIDE:-default}}"
 VIRGL_SERVER_PROFILE="${RLT_VIRGL_SERVER_PROFILE:-${VIRGL_SERVER_PROFILE_OVERRIDE:-default}}"
 RUNELITE_LAUNCH_MODE="${RLT_RUNELITE_LAUNCH_MODE:-${RUNELITE_LAUNCH_MODE_OVERRIDE:-launcher}}"
-upsert_runelite_setting() {
-    local key="$1"
-    local value="$2"
-    if grep -q "^${key}=" "$RUNELITE_SETTINGS_FILE" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=${value}|" "$RUNELITE_SETTINGS_FILE"
-    else
-        printf '%s=%s\n' "$key" "$value" >> "$RUNELITE_SETTINGS_FILE"
-    fi
-}
-remove_runelite_setting() {
-    local key="$1"
-    sed -i "/^${key}=.*/d" "$RUNELITE_SETTINGS_FILE" 2>/dev/null || true
-}
-upsert_runelite_setting "gpu.unlockFps" "$RUNELITE_UNLOCK_FPS"
-upsert_runelite_setting "gpu.fpsTarget" "$RUNELITE_TARGET_FPS"
-upsert_runelite_setting "gpu.vsyncMode" "$RUNELITE_VSYNC_MODE"
-upsert_runelite_setting "runelite.gpuplugin" "true"
-echo "Configured RuneLite GPU settings: unlockFps=$RUNELITE_UNLOCK_FPS fpsTarget=$RUNELITE_TARGET_FPS vsyncMode=$RUNELITE_VSYNC_MODE" >&2
-upsert_runelite_setting "fpscontrol.limitFps" "false"
-upsert_runelite_setting "fpscontrol.limitFpsUnfocused" "false"
-upsert_runelite_setting "fpscontrol.maxFps" "360"
-upsert_runelite_setting "fpscontrol.maxFpsUnfocused" "15"
-upsert_runelite_setting "fpscontrol.drawFps" "false"
-remove_runelite_setting "gpu.drawDistance"
-remove_runelite_setting "gpu.expandedMapLoadingChunks"
-remove_runelite_setting "gpu.smoothBanding"
-remove_runelite_setting "gpu.antiAliasingMode"
-# RuneLite 1.12.24 rejects NONE for gpu.uiScalingMode and falls back to HYBRID
-# after logging a config unmarshal exception. Keep the profile valid so GPU
-# startup is not blocked by a known-bad enum value.
-upsert_runelite_setting "gpu.uiScalingMode" "HYBRID"
-remove_runelite_setting "gpu.anisotropicFilteringLevel"
-remove_runelite_setting "gpu.removeVertexSnapping"
-echo "Configured RuneLite GPU profile: default (cleared branch-forced GPU profile overrides)" >&2
+echo "RuneLite configuration boundary: user-managed settings preserved without launcher writes" >&2
 
 case "$MESA_PROFILE" in
     default)
@@ -1209,48 +1169,13 @@ fi
 
 # ===================================================================
 # RuneLite observability
-# - Tail client.log → Android logcat tag 'RLClient' so DebugLogServer
-#   forwards GPU plugin / rlawt / FPS events to the debug viewer.
-# - OPT-IN FPS probe (RLT_DEBUG_FPS_PROBE=1): overwrites RuneLite
-#   profile keys gpu.fpsTarget / fpscontrol.maxFps / fpscontrol.drawFps
-#   to lift caps and show the on-screen FPS overlay. Default OFF so
-#   user-configured profiles are not clobbered on every launch.
-#   When the flag is OFF and a *.rlt-orig backup exists, the profile is
-#   restored from the backup (reverts any prior probe run).
-# All edits are to user config files RuneLite itself writes; nothing is
-# modified in the RuneLite binaries.
+# - Tail the stock client.log to Android logcat so the app can observe
+#   already-emitted GPU/plugin lifecycle events.
+# - Never mutate RuneLite profiles or settings. Visual quality, plugin
+#   configuration, login, and gameplay remain user-owned boundaries.
 # ===================================================================
 ROOTFS_PATH="$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu"
-RL_PROFILE_DIR="$ROOTFS_PATH/root/.runelite/profiles2"
 RL_CLIENT_LOG="$ROOTFS_PATH/root/.runelite/logs/client.log"
-
-if [ -d "$RL_PROFILE_DIR" ]; then
-    if [ "${RLT_DEBUG_FPS_PROBE:-0}" = "1" ]; then
-        for CFG in "$RL_PROFILE_DIR"/*.properties; do
-            [ -f "$CFG" ] || continue
-            [ -f "$CFG.rlt-orig" ] || cp "$CFG" "$CFG.rlt-orig"
-            sed -i \
-                -e 's/^gpu\.fpsTarget=.*/gpu.fpsTarget=0/' \
-                -e 's/^fpscontrol\.maxFps=.*/fpscontrol.maxFps=999/' \
-                -e 's/^fpscontrol\.drawFps=.*/fpscontrol.drawFps=true/' \
-                "$CFG"
-            grep -q '^gpu\.fpsTarget='       "$CFG" || echo 'gpu.fpsTarget=0'        >> "$CFG"
-            grep -q '^fpscontrol\.maxFps='   "$CFG" || echo 'fpscontrol.maxFps=999'   >> "$CFG"
-            grep -q '^fpscontrol\.drawFps='  "$CFG" || echo 'fpscontrol.drawFps=true' >> "$CFG"
-            echo "RL-CONFIG: probe-on — patched $(basename "$CFG") gpu.fpsTarget=0 maxFps=999 drawFps=true" | tee -a "$LOGFILE"
-        done
-    else
-        # Probe disabled — restore original profile if we previously clobbered it.
-        for BAK in "$RL_PROFILE_DIR"/*.properties.rlt-orig; do
-            [ -f "$BAK" ] || continue
-            CFG="${BAK%.rlt-orig}"
-            cp "$BAK" "$CFG"
-            echo "RL-CONFIG: probe-off — restored $(basename "$CFG") from .rlt-orig backup" | tee -a "$LOGFILE"
-        done
-    fi
-else
-    echo "RL-CONFIG: profile dir missing ($RL_PROFILE_DIR), skipping probe" | tee -a "$LOGFILE"
-fi
 
 if [ -x /system/bin/log ]; then
     # Background tail: wait for client.log, then stream filtered lines to
@@ -1275,6 +1200,77 @@ else
     echo "RL-LOG-TAIL: /system/bin/log unavailable, skipping client.log forwarding" | tee -a "$LOGFILE"
 fi
 
+extract_official_classpath_since() {
+    local first_line="$1"
+    local direct_line
+    direct_line="$(
+        tail -n "+$first_line" "$LOGFILE" 2>/dev/null |
+            grep -F 'JvmLauncher - Running [' |
+            tail -n 1 ||
+            true
+    )"
+    [ -n "$direct_line" ] || return 1
+    direct_line="${direct_line#* -cp, }"
+    direct_line="${direct_line%%, -XX:+DisableAttachMechanism*}"
+    [ -n "$direct_line" ] || return 1
+    printf '%s\n' "$direct_line"
+}
+
+record_verified_official_artifacts() {
+    local first_line="$1"
+    local direct_classpath
+    local runelite_jar="$ROOTFS_PATH/root/runelite/RuneLite.jar"
+    local runelite_repo="$ROOTFS_PATH/root/.runelite/repository2"
+    local temp_hash_file="$RUNELITE_ARTIFACT_HASH_FILE.$$.tmp"
+    local hash_count
+
+    direct_classpath="$(extract_official_classpath_since "$first_line" || true)"
+    [ -n "$direct_classpath" ] || return 1
+    [ -f "$runelite_jar" ] || return 1
+    [ -d "$runelite_repo" ] || return 1
+
+    mkdir -p "$(dirname "$RUNELITE_ARTIFACT_HASH_FILE")"
+    {
+        sha256sum "$runelite_jar"
+        find "$runelite_repo" -maxdepth 1 -type f -name '*.jar' -print0 2>/dev/null |
+            sort -z |
+            xargs -0 -r sha256sum
+    } > "$temp_hash_file"
+    hash_count="$(wc -l < "$temp_hash_file" | tr -d '[:space:]')"
+    if [ "${hash_count:-0}" -lt 2 ]; then
+        rm -f "$temp_hash_file"
+        return 1
+    fi
+
+    mv "$temp_hash_file" "$RUNELITE_ARTIFACT_HASH_FILE"
+    printf '%s\n' "$direct_classpath" > "$TERMUX_DIRECT_CLASSPATH_FILE"
+    rm -f "$RUNELITE_REFRESH_REQUIRED_FILE"
+    echo "OFFICIAL-ARTIFACTS: official launcher verification observed; hashes=$RUNELITE_ARTIFACT_HASH_FILE count=$hash_count" |
+        tee -a "$LOGFILE"
+}
+
+watch_for_verified_official_artifacts() {
+    local first_line="$1"
+    local attempt
+    for attempt in $(seq 1 180); do
+        if record_verified_official_artifacts "$first_line"; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "WARNING: official artifact verification was not observed; native refresh remains required" |
+        tee -a "$LOGFILE"
+    return 1
+}
+
+OFFICIAL_WATCH_START_LINE="$(( $(wc -l < "$LOGFILE") + 1 ))"
+if [ "${RLT_RUNELITE_LAUNCH_MODE:-${RUNELITE_LAUNCH_MODE_OVERRIDE:-launcher}}" = "launcher" ]; then
+    watch_for_verified_official_artifacts "$OFFICIAL_WATCH_START_LINE" &
+    OFFICIAL_ARTIFACT_WATCHDOG_PID=$!
+    echo "OFFICIAL-ARTIFACTS: watchdog started pid=$OFFICIAL_ARTIFACT_WATCHDOG_PID start_line=$OFFICIAL_WATCH_START_LINE" |
+        tee -a "$LOGFILE"
+fi
+
 proot-distro login ubuntu --shared-tmp $GPU_BIND -- env \
     RLT_SESSION_DIR_IN_PROOT="/tmp/rlt-session/$SESSION_ID" \
     RLT_PROOT_ENV_FILE="$PROOT_ENV_FILE" \
@@ -1296,11 +1292,7 @@ rm -f "$PROOT_LAUNCH_SCRIPT_TERMUX" 2>/dev/null || true
 # PIPESTATUS[0] captures proot-distro exit code, not tee's exit code.
 EXIT_CODE=${PIPESTATUS[0]}
 if [ "${RLT_RUNELITE_LAUNCH_MODE:-${RUNELITE_LAUNCH_MODE_OVERRIDE:-launcher}}" = "launcher" ]; then
-    LAST_DIRECT_CLASSPATH="$(extract_direct_classpath_from_log "$LOGFILE" || true)"
-    if [ -n "$LAST_DIRECT_CLASSPATH" ]; then
-        printf '%s\n' "$LAST_DIRECT_CLASSPATH" > "$TERMUX_DIRECT_CLASSPATH_FILE"
-        echo "Saved direct RuneLite classpath to $TERMUX_DIRECT_CLASSPATH_FILE" | tee -a "$LOGFILE"
-    fi
+    record_verified_official_artifacts "$OFFICIAL_WATCH_START_LINE" || true
 fi
 echo "RuneLite exited with code: $EXIT_CODE" | tee -a "$LOGFILE"
 

@@ -141,7 +141,6 @@ ROOTFS_PATH="$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu"
 RL_DOT_DIR="$ROOTFS_PATH/root/.runelite"
 RL_REPO_DIR="$RL_DOT_DIR/repository2"
 RL_PROFILE_DIR="$RL_DOT_DIR/profiles2"
-RL_CLIENT_LOG="$RL_DOT_DIR/logs/client.log"
 # APK-deployed location for the Bionic rlawt jar.
 # Set RLT_RLAWT_BIONIC_JAR to override (e.g. during ad-hoc adb push testing).
 #
@@ -520,118 +519,11 @@ echo "=== DIAG end ===" | tee -a "$LOGFILE"
 
 rlt_log_cpuset "virgl-ready" "${VIRGL_PID:-$$}"
 
-# ===================================================================
-# Profile-patching: rewrite runelite.gameSize + enable KEEP_WINDOW_SIZE resize +
-# enable stretched mode so the AWT Frame fills the Termux:X11 canvas
-# instead of rendering at the last cached "postcard" size (typ 765×503).
-#
-# Values come from the Kotlin side — RLT_GAME_SIZE_W/H are computed from
-# context.resources.displayMetrics / uiScale, since run-as com.termux
-# can't query WindowManagerService. The shell must not hardcode sizes
-# (see memory/feedback_no_hardcoded_ui_sizes.md).
-#
-# Backup is taken to .rlt-orig-native once (distinct from the proot
-# probe's .rlt-orig suffix) so the two launch paths don't step on
-# each other's backups.
-# ===================================================================
-if [ -d "$ROOTFS_PATH/root/.runelite/profiles2" ] \
-   && [ -n "${RLT_GAME_SIZE_W:-}" ] \
-   && [ -n "${RLT_GAME_SIZE_H:-}" ]; then
-    for CFG in "$ROOTFS_PATH/root/.runelite/profiles2"/*.properties; do
-        [ -f "$CFG" ] || continue
-        case "$(basename "$CFG")" in
-            *rsprofile*) continue ;;
-        esac
-        [ -f "$CFG.rlt-orig-native" ] || cp "$CFG" "$CFG.rlt-orig-native"
-        if grep -q '^runelite\.gameSize=' "$CFG"; then
-            sed -i "s/^runelite\.gameSize=.*/runelite.gameSize=${RLT_GAME_SIZE_W}x${RLT_GAME_SIZE_H}/" "$CFG"
-        else
-            printf 'runelite.gameSize=%dx%d\n' "$RLT_GAME_SIZE_W" "$RLT_GAME_SIZE_H" >> "$CFG"
-        fi
-        if grep -q '^runelite\.automaticResizeType=' "$CFG"; then
-            sed -i 's/^runelite\.automaticResizeType=.*/runelite.automaticResizeType=KEEP_WINDOW_SIZE/' "$CFG"
-        else
-            echo 'runelite.automaticResizeType=KEEP_WINDOW_SIZE' >> "$CFG"
-        fi
-        if grep -q '^stretchedmode\.scalingFactor=' "$CFG"; then
-            sed -i 's/^stretchedmode\.scalingFactor=.*/stretchedmode.scalingFactor=100/' "$CFG"
-        else
-            echo 'stretchedmode.scalingFactor=100' >> "$CFG"
-        fi
-        if grep -q '^stretchedmode\.keepAspectRatio=' "$CFG"; then
-            sed -i 's/^stretchedmode\.keepAspectRatio=.*/stretchedmode.keepAspectRatio=true/' "$CFG"
-        else
-            echo 'stretchedmode.keepAspectRatio=true' >> "$CFG"
-        fi
-        # S82: maximize the AWT Frame on launch so RL fills the X11 device width
-        # instead of centering at gameSize+chrome. Verified upstream — ClientUI
-        # reads `runelite.clientMaximized` and calls setExtendedState(MAXIMIZED_BOTH)
-        # at startup. Without this, S82 captured Frame=1238×924 in a 1480×924 device
-        # leaving 121×2 java2D pixels of band on each side.
-        if grep -q '^runelite\.clientMaximized=' "$CFG"; then
-            sed -i 's/^runelite\.clientMaximized=.*/runelite.clientMaximized=true/' "$CFG"
-        else
-            echo 'runelite.clientMaximized=true' >> "$CFG"
-        fi
-        if grep -q '^runelite\.gpuplugin=' "$CFG"; then
-            sed -i 's/^runelite\.gpuplugin=.*/runelite.gpuplugin=true/' "$CFG"
-        else
-            echo 'runelite.gpuplugin=true' >> "$CFG"
-        fi
-        if grep -q '^gpu\.unlockFps=' "$CFG"; then
-            sed -i 's/^gpu\.unlockFps=.*/gpu.unlockFps=true/' "$CFG"
-        else
-            echo 'gpu.unlockFps=true' >> "$CFG"
-        fi
-        if grep -q '^gpu\.fpsTarget=' "$CFG"; then
-            sed -i 's/^gpu\.fpsTarget=.*/gpu.fpsTarget=120/' "$CFG"
-        else
-            echo 'gpu.fpsTarget=120' >> "$CFG"
-        fi
-        if grep -q '^gpu\.vsyncMode=' "$CFG"; then
-            sed -i 's/^gpu\.vsyncMode=.*/gpu.vsyncMode=OFF/' "$CFG"
-        else
-            echo 'gpu.vsyncMode=OFF' >> "$CFG"
-        fi
-        # RuneLite 1.12.24 no longer accepts NONE for gpu.uiScalingMode; it
-        # throws during config unmarshal and resets to HYBRID anyway. Keep the
-        # value valid so the GPU plugin can start cleanly.
-        if grep -q '^gpu\.uiScalingMode=' "$CFG"; then
-            sed -i 's/^gpu\.uiScalingMode=.*/gpu.uiScalingMode=HYBRID/' "$CFG"
-        else
-            echo 'gpu.uiScalingMode=HYBRID' >> "$CFG"
-        fi
-        echo "RL-CONFIG native: patched $(basename "$CFG") gameSize=${RLT_GAME_SIZE_W}x${RLT_GAME_SIZE_H} resize=KEEP_WINDOW_SIZE stretched=100 keepAspect=true clientMaximized=true gpuplugin=true fpsTarget=120 unlockFps=true vsync=OFF gpu.uiScalingMode=HYBRID" | tee -a "$LOGFILE"
-        # S82 verification: re-read each key from disk and confirm it matches what
-        # we *think* we wrote. Without this, a sed-pattern bug or write-permission
-        # failure would silently leave RL on the prior values and we'd re-debug
-        # the symptom instead of the cause. Each VERIFY line is grep-friendly.
-        _expect() {
-            local key="$1" expected="$2" actual
-            actual="$(grep -E "^${key}=" "$CFG" 2>/dev/null | tail -1 | cut -d= -f2-)"
-            if [ "$actual" = "$expected" ]; then
-                echo "VERIFY native: $(basename "$CFG") ${key}=${actual} EXPECTED=${expected} MATCH=Y" | tee -a "$LOGFILE"
-            else
-                echo "VERIFY-FAIL native: $(basename "$CFG") ${key}=${actual} EXPECTED=${expected} MATCH=N" | tee -a "$LOGFILE"
-            fi
-        }
-        _expect "runelite.gameSize"            "${RLT_GAME_SIZE_W}x${RLT_GAME_SIZE_H}"
-        _expect "runelite.automaticResizeType" "KEEP_WINDOW_SIZE"
-        _expect "stretchedmode.scalingFactor"  "100"
-        _expect "stretchedmode.keepAspectRatio" "true"
-        _expect "runelite.clientMaximized"     "true"
-        _expect "runelite.gpuplugin"           "true"
-        _expect "gpu.unlockFps"                "true"
-        _expect "gpu.fpsTarget"                "120"
-        _expect "gpu.vsyncMode"                "OFF"
-        _expect "gpu.uiScalingMode"            "HYBRID"
-        unset -f _expect
-    done
-else
-    if [ -z "${RLT_GAME_SIZE_W:-}" ] || [ -z "${RLT_GAME_SIZE_H:-}" ]; then
-        echo "RL-CONFIG native: RLT_GAME_SIZE_W/H not provided — profile patch skipped" | tee -a "$LOGFILE"
-    fi
-fi
+# RuneLite profiles and settings are user-owned. The native compatibility
+# path observes them but never edits visual quality, window, plugin, pacing,
+# login, or gameplay configuration.
+echo "RuneLite configuration boundary: user-managed settings preserved without launcher writes" |
+    tee -a "$LOGFILE"
 
 # ===================================================================
 # Build RuneLite classpath at runtime
@@ -957,13 +849,12 @@ _find_tid_by_comm() {
     for t in /proc/$JAVA_PID/task/*; do
         [ -d "$t" ] || continue
         comm=$(cat "$t/comm" 2>/dev/null || echo)
-        case "$comm" in
-            $pattern)
-                tid="${t##*/}"
-                echo "$tid"
-                return 0
-                ;;
-        esac
+        if [[ "$comm" == "$pattern" ||
+            ("$pattern" == "AWT-EventQueue*" && "$comm" == AWT-EventQueue*) ]]; then
+            tid="${t##*/}"
+            echo "$tid"
+            return 0
+        fi
     done
     return 1
 }
@@ -985,10 +876,10 @@ start_affinity_timeline() {
     : > "$AFFINITY_TIMELINE_CSV"
     echo "ts,jvm_cpus,virgl_cpus,client_tid,client_cpus,awt_tid,awt_cpus" >> "$AFFINITY_TIMELINE_CSV"
     (
-        local i ts jvm_cpus virgl_cpus client_tid client_cpus awt_tid awt_cpus
+        local ts jvm_cpus virgl_cpus client_tid client_cpus awt_tid awt_cpus
         # First 60 samples at 1Hz catches the AMS demotion window; then 10s
         # cadence to keep the file size sane on long sessions.
-        for i in $(seq 1 60); do
+        for _ in {1..60}; do
             [ ! -d "/proc/$JAVA_PID" ] && exit 0
             ts=$(date +%s)
             jvm_cpus=$(_cpus_allowed_for_pid "$JAVA_PID")

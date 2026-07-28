@@ -14,6 +14,7 @@ import com.runelitetablet.auth.JagexOAuth2Manager
 import com.runelitetablet.testutil.FakeCleaner
 import com.runelitetablet.testutil.FakeCommandRunner
 import com.runelitetablet.testutil.FakeCredentialStore
+import com.runelitetablet.testutil.FakeCaptureController
 import com.runelitetablet.testutil.FakePackageChecker
 import com.runelitetablet.testutil.FakePermissionChecker
 import com.runelitetablet.testutil.FakeScriptDeployer
@@ -91,6 +92,7 @@ class SetupViewModelTest {
             displayPreferences = UnsafeHelper.allocate(DisplayPreferences::class.java),
             launchPreferences = UnsafeHelper.allocate(com.runelitetablet.ui.LaunchPreferences::class.java),
             presentationBackend = com.runelitetablet.presentation.PresentationBackends.stable,
+            captureController = FakeCaptureController(),
             authCoordinator = authCoordinator,
             scope = TestScope(testDispatcher),
             logger = logger, ioDispatcher = testDispatcher

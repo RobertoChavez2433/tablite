@@ -9,7 +9,8 @@ enum class RendererBackend(val id: Int, val envValue: String) {
     NATIVE_X11_VIRGL(1, "native_x11_virgl_gpu"),
     DIRECT_VIRGL_AHB(2, "direct_virgl_ahb"),
     DIRECT_ZINK_AHB(3, "direct_zink_ahb"),
-    SOFTWARE_X11(4, "software_x11");
+    SOFTWARE_X11(4, "software_x11"),
+    PROOT_X11_VIRGL(5, "proot_x11_virgl_gpu");
 
     companion object {
         fun fromEnv(value: String?): RendererBackend =

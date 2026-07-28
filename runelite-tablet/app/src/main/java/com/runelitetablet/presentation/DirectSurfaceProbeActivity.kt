@@ -19,14 +19,14 @@ import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
+import androidx.annotation.RequiresApi
+import com.runelitetablet.RuneLiteTabletApp
 import com.runelitetablet.directsurface.HardwareBufferPatternWriter
 import com.runelitetablet.logging.AppLog
-import com.runelitetablet.telemetry.CaptureSessionRegistry
 import com.runelitetablet.telemetry.FrameEventType
 import com.runelitetablet.telemetry.FrameOutcome
 import com.runelitetablet.telemetry.FrameStage
 import com.runelitetablet.telemetry.RendererBackend
-import com.runelitetablet.telemetry.TelemetryExporter
 import com.runelitetablet.ui.LaunchPreferences
 import java.io.File
 import java.time.Duration
@@ -48,6 +48,14 @@ class DirectSurfaceProbeActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT < 35) {
+            AppLog.e(
+                "DIRECT_SURFACE",
+                "DirectSurfaceProbeActivity requires API 35; device API=${Build.VERSION.SDK_INT}"
+            )
+            finish()
+            return
+        }
         enableEdgeToEdge()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         @Suppress("DEPRECATION")
@@ -84,12 +92,11 @@ class DirectSurfaceProbeActivity : ComponentActivity() {
         })
 
         val preferences = LaunchPreferences(this)
-        val session = CaptureSessionRegistry.start(
+        val session = (application as RuneLiteTabletApp).container.captureController.start(
             backend = RendererBackend.DIRECT_VIRGL_AHB,
             telemetryMode = preferences.telemetryMode,
             targetHz = preferences.targetHz
         )
-        TelemetryExporter.start(applicationContext, session)
         AppLog.state(
             "CAPTURE-START runId=${session.manifest.runId} backend=${session.manifest.backend} " +
                 "mode=${session.manifest.telemetryMode} targetHz=${session.manifest.targetHz} " +
@@ -100,18 +107,24 @@ class DirectSurfaceProbeActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        probeView.startProbe()
+        if (Build.VERSION.SDK_INT >= 35 && ::probeView.isInitialized) {
+            probeView.startProbe()
+        }
         AppLog.lifecycle("DirectSurfaceProbeActivity.onResume")
     }
 
     override fun onPause() {
-        probeView.stopProbe("activity-pause")
+        if (Build.VERSION.SDK_INT >= 35 && ::probeView.isInitialized) {
+            probeView.stopProbe("activity-pause")
+        }
         AppLog.lifecycle("DirectSurfaceProbeActivity.onPause")
         super.onPause()
     }
 
     override fun onDestroy() {
-        probeView.destroy()
+        if (Build.VERSION.SDK_INT >= 35 && ::probeView.isInitialized) {
+            probeView.destroy()
+        }
         super.onDestroy()
     }
 
@@ -120,10 +133,13 @@ class DirectSurfaceProbeActivity : ComponentActivity() {
     }
 }
 
+@RequiresApi(35)
 private class SurfaceControlBufferProbeView(
     private val activity: DirectSurfaceProbeActivity,
     private val onStatus: (String) -> Unit
 ) : SurfaceView(activity), SurfaceHolder.Callback, Choreographer.FrameCallback {
+    private val captureController =
+        (activity.application as RuneLiteTabletApp).container.captureController
     private data class BufferSlot(
         val index: Int,
         val buffer: HardwareBuffer,
@@ -644,7 +660,7 @@ private class SurfaceControlBufferProbeView(
         poolGeneration: Int = generation,
         eventFlags: Long = 0
     ) {
-        CaptureSessionRegistry.active?.recorder?.record(
+        captureController.active?.recorder?.record(
             threadId = Process.myTid(),
             frameSeq = frameSeq,
             stage = stage,

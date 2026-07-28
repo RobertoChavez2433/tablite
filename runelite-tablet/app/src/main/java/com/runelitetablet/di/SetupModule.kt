@@ -16,7 +16,6 @@ import com.runelitetablet.setup.SetupOrchestrator
 import com.runelitetablet.setup.SetupStepRunner
 import com.runelitetablet.setup.SetupVerifier
 import com.runelitetablet.setup.SharedPrefsSetupStateStore
-import com.runelitetablet.termux.TermuxCommandRunner
 
 class SetupModule(
     context: Context,
@@ -29,7 +28,7 @@ class SetupModule(
     val stateStore: SetupStateStore = SharedPrefsSetupStateStore(context).also {
         AppLog.d("DI", "SetupModule: SetupStateStore initialized")
     }
-    val scriptManager = ScriptManager(context, commandRunner as TermuxCommandRunner).also {
+    val scriptManager = ScriptManager(context, commandRunner).also {
         AppLog.d("DI", "SetupModule: ScriptManager initialized")
     }
     private val cleanupManager = CleanupManager(context)

@@ -1,5 +1,7 @@
 package com.termux.x11
 
+import android.annotation.SuppressLint
+
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -170,6 +172,7 @@ class LorieView : SurfaceView {
         triggerCallback()
     }
 
+    @SuppressLint("WrongConstant")
     fun triggerCallback() {
         setFocusable(true)
         setFocusableInTouchMode(true)

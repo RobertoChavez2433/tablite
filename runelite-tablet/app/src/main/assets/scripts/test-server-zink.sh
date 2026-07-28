@@ -59,7 +59,7 @@ ZINK_PID=$!
 echo "ZINK_EVAL: zink virgl server started PID=$ZINK_PID" | tee -a "$ZINK_LOG"
 
 # Wait for socket
-for i in $(seq 1 10); do
+for _ in {1..10}; do
     [ -S "$PREFIX/tmp/.virgl_test" ] && break
     sleep 0.5
 done

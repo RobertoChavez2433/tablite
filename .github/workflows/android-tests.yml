@@ -5,11 +5,17 @@ on:
     branches: [master, main]
     paths:
       - 'runelite-tablet/**'
+      - 'scripts/**'
+      - 'tools/quality/**'
+      - 'third_party/termux-x11-upstream/app/src/main/cpp/lorie/renderer.c'
       - '.github/workflows/android-tests.yml'
   pull_request:
     branches: [master, main]
     paths:
       - 'runelite-tablet/**'
+      - 'scripts/**'
+      - 'tools/quality/**'
+      - 'third_party/termux-x11-upstream/app/src/main/cpp/lorie/renderer.c'
       - '.github/workflows/android-tests.yml'
 
 jobs:
@@ -39,6 +45,12 @@ jobs:
       - name: Run unit tests
         working-directory: runelite-tablet
         run: ./gradlew test --no-daemon
+
+      - name: Install canonical analyzer dependencies
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Verify architecture and language diagnostics
+        run: python tools/quality/analyzer.py --require-external-tools
 
       - name: Upload test results
         if: always()

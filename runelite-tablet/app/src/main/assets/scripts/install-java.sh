@@ -1,8 +1,8 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -euo pipefail
 
-# install-java.sh — Step 4: Install OpenJDK 11 + x11-xserver-utils (xrandr) + openbox inside Ubuntu proot
-# Idempotent: skips if java binary already exists in proot.
+# install-java.sh — Step 4: Install OpenJDK 21 + x11-xserver-utils (xrandr) + openbox inside Ubuntu proot
+# Idempotent: skips only when a compatible Java 21+ runtime already exists.
 # Writes step-java.done marker only after positive verification.
 
 SCRIPT_VERSION="7"
@@ -10,10 +10,17 @@ MARKER_DIR="$HOME/.runelite-tablet/markers"
 
 echo "=== Installing Java + openbox + x11-xserver-utils inside Ubuntu ==="
 
-# Check if Java is already installed — skip if so (idempotent)
+# Check the runtime version, not merely whether `java` exists. RuneLite
+# launcher 2.8.0 is Java 17 bytecode; the old Java 11 presence check falsely
+# treated an incompatible installation as ready.
 JAVA_BIN=$(proot-distro login ubuntu -- which java 2>/dev/null < /dev/null || echo "")
-if [ -n "$JAVA_BIN" ]; then
-    echo "Java already installed at $JAVA_BIN, skipping"
+JAVA_MAJOR=$(proot-distro login ubuntu -- bash -c '
+    java -XshowSettings:properties -version 2>&1 |
+        sed -n "s/^[[:space:]]*java.version = \([0-9][0-9]*\).*/\1/p" |
+        head -1
+' 2>/dev/null < /dev/null || echo "")
+if [ -n "$JAVA_BIN" ] && [ "${JAVA_MAJOR:-0}" -ge 21 ]; then
+    echo "Compatible Java $JAVA_MAJOR already installed at $JAVA_BIN, skipping package install"
 else
     # DEBIAN_FRONTEND=noninteractive prevents debconf prompts that hang in background mode.
     # proot login has harmless /proc/self/fd warnings — tolerate non-zero and verify afterward.
@@ -30,8 +37,14 @@ else
             sleep 5
             attempt=$((attempt + 1))
         done
-        apt-get install -y openjdk-11-jdk x11-xserver-utils openbox wget ca-certificates
-        if java -version 2>&1; then
+        apt-get install -y openjdk-21-jdk x11-xserver-utils openbox wget ca-certificates
+        update-alternatives --auto java
+        update-alternatives --auto javac
+        JAVA_MAJOR=$(java -XshowSettings:properties -version 2>&1 |
+            sed -n 's/^[[:space:]]*java.version = \([0-9][0-9]*\).*/\1/p' |
+            head -1)
+        if [ "${JAVA_MAJOR:-0}" -ge 21 ]; then
+            java -version 2>&1
             echo "=== Java install OK ==="
         fi
 JAVA_SCRIPT
@@ -58,13 +71,18 @@ proot-distro login ubuntu -- bash -c 'mkdir -p /root/.config/openbox && cat > /r
 </openbox_config>
 OBCFG
 
-# Positive verification: check java binary exists
+# Positive verification: check a Java 21+ binary is selected
 JAVA_BIN=$(proot-distro login ubuntu -- which java 2>/dev/null < /dev/null || echo "")
-if [ -z "$JAVA_BIN" ]; then
-    echo "ERROR: java binary not found after install" >&2
+JAVA_MAJOR=$(proot-distro login ubuntu -- bash -c '
+    java -XshowSettings:properties -version 2>&1 |
+        sed -n "s/^[[:space:]]*java.version = \([0-9][0-9]*\).*/\1/p" |
+        head -1
+' 2>/dev/null < /dev/null || echo "")
+if [ -z "$JAVA_BIN" ] || [ "${JAVA_MAJOR:-0}" -lt 21 ]; then
+    echo "ERROR: Java 21+ not selected after install (path=${JAVA_BIN:-missing} major=${JAVA_MAJOR:-missing})" >&2
     exit 1
 fi
-echo "Java verified at $JAVA_BIN"
+echo "Java $JAVA_MAJOR verified at $JAVA_BIN"
 
 # Write marker only after positive verification
 mkdir -p "$MARKER_DIR"

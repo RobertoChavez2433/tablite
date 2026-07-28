@@ -9,8 +9,8 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import com.runelitetablet.logging.AppLog
+import com.runelitetablet.di.SetupViewModelFactory
 import com.runelitetablet.setup.SetupViewModel
-import com.runelitetablet.setup.SetupViewModelFactory
 import com.runelitetablet.ui.screens.SetupScreen
 import com.runelitetablet.ui.theme.RuneLiteTabletTheme
 
