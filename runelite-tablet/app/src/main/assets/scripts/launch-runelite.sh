@@ -14,6 +14,15 @@ export PATH="$PREFIX/bin:$PATH"
 export TMPDIR="${TMPDIR:-$PREFIX/tmp}"
 mkdir -p "$TMPDIR"
 
+# Shared capture contract for the legacy/proot comparison lane.
+RLT_CAPTURE_ID="${RLT_CAPTURE_ID:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || printf 'manual-%s-%s' "$(date +%s)" "$$")}"
+RLT_TELEMETRY_MODE="${RLT_TELEMETRY_MODE:-SUMMARY}"
+RLT_RENDERER_BACKEND="${RLT_RENDERER_BACKEND:-native_x11_virgl_gpu}"
+RLT_TARGET_HZ="${RLT_TARGET_HZ:-120}"
+RLT_CAPTURE_DIR="${RLT_CAPTURE_DIR:-$HOME/.rlt/captures/$RLT_CAPTURE_ID}"
+export RLT_CAPTURE_ID RLT_TELEMETRY_MODE RLT_RENDERER_BACKEND RLT_TARGET_HZ RLT_CAPTURE_DIR
+mkdir -p "$RLT_CAPTURE_DIR"
+
 LOGFILE="$HOME/runelite-launch.log"
 
 # S75 Path A instrumentation: log Termux's cpuset at script entry so we can
@@ -64,6 +73,14 @@ PERF_MONITOR_PID=""
 RL_LOG_TAIL_PID=""
 mkdir -p "$TERMUX_RUNELITE_SETTINGS_DIR"
 echo "=== RuneLite launch $(date) ===" | tee -a "$LOGFILE"
+printf '%s\n' \
+    "capture_id=$RLT_CAPTURE_ID" \
+    "telemetry_mode=$RLT_TELEMETRY_MODE" \
+    "renderer_backend=$RLT_RENDERER_BACKEND" \
+    "target_hz=$RLT_TARGET_HZ" \
+    "capture_dir=$RLT_CAPTURE_DIR" \
+    > "$RLT_CAPTURE_DIR/launcher-context.txt"
+echo "CAPTURE: id=$RLT_CAPTURE_ID mode=$RLT_TELEMETRY_MODE backend=$RLT_RENDERER_BACKEND target_hz=$RLT_TARGET_HZ dir=$RLT_CAPTURE_DIR" | tee -a "$LOGFILE"
 
 acquire_launch_lock() {
     if mkdir "$LAUNCH_LOCK_DIR" 2>/dev/null; then

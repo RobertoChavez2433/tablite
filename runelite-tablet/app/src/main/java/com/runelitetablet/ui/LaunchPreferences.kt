@@ -1,7 +1,8 @@
 package com.runelitetablet.ui
 
 import android.content.Context
-import java.io.File
+import com.runelitetablet.telemetry.RendererBackend
+import com.runelitetablet.telemetry.TelemetryMode
 
 /**
  * Persistent launch preferences backed by SharedPreferences.
@@ -10,7 +11,6 @@ import java.io.File
  */
 class LaunchPreferences(context: Context) {
     private val prefs = context.getSharedPreferences("launch_prefs", Context.MODE_PRIVATE)
-    private val filesDir = context.filesDir
 
     /**
      * When true, launches RuneLite directly under Termux-native openjdk-21 via
@@ -25,12 +25,34 @@ class LaunchPreferences(context: Context) {
         get() = prefs.getBoolean("use_native_termux", false)
         set(value) = prefs.edit().putBoolean("use_native_termux", value).apply()
 
-    // True iff the rlawt-on-Surface (direct-Android) path should be used. When
-    // set, LaunchCoordinator starts the app-side direct control socket and
-    // foregrounds HybridX11HostActivity for login. The native rlawt backend
-    // then asks that control socket to foreground DirectSurfaceHostActivity on
-    // first GPU context creation.
-    // Flip via:  adb shell run-as com.runelitetablet touch files/.use-direct-surface
+    /**
+     * Single renderer selection used by the app and both launch scripts.
+     *
+     * New launches communicate exclusively through RLT_RENDERER_BACKEND.
+     * Stale prototype marker files are intentionally ignored.
+     */
+    var rendererBackend: RendererBackend
+        get() {
+            val stored = prefs.getString("renderer_backend", null)
+            return if (stored != null) {
+                RendererBackend.fromEnv(stored)
+            } else {
+                RendererBackend.NATIVE_X11_VIRGL
+            }
+        }
+        set(value) {
+            prefs.edit().putString("renderer_backend", value.envValue).apply()
+        }
+
     val useDirectSurface: Boolean
-        get() = File(filesDir, ".use-direct-surface").exists()
+        get() = rendererBackend == RendererBackend.DIRECT_VIRGL_AHB ||
+            rendererBackend == RendererBackend.DIRECT_ZINK_AHB
+
+    var telemetryMode: TelemetryMode
+        get() = TelemetryMode.fromEnv(prefs.getString("telemetry_mode", TelemetryMode.SUMMARY.envValue))
+        set(value) = prefs.edit().putString("telemetry_mode", value.envValue).apply()
+
+    var targetHz: Int
+        get() = prefs.getInt("target_hz", 120).coerceIn(30, 240)
+        set(value) = prefs.edit().putInt("target_hz", value.coerceIn(30, 240)).apply()
 }

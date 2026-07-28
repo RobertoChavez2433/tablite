@@ -315,15 +315,17 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_createGLContext(JNIEnv
 		ctx->perf.xsync_samples  = (uint64_t *)calloc(window, sizeof(uint64_t));
 		ctx->perf.finish_samples = (uint64_t *)calloc(window, sizeof(uint64_t));
 		ctx->perf.gpu_samples    = (uint64_t *)calloc(window, sizeof(uint64_t));
+		ctx->perf.gpu_sample_frame_seq = (uint64_t *)calloc(window, sizeof(uint64_t));
 		if (!ctx->perf.swap_samples || !ctx->perf.gap_samples ||
 			!ctx->perf.xsync_samples || !ctx->perf.finish_samples ||
-			!ctx->perf.gpu_samples) {
+			!ctx->perf.gpu_samples || !ctx->perf.gpu_sample_frame_seq) {
 			RLAWT_LOG("[rlawt-perf] WARN sample buffer alloc failed; disabling perf\n");
 			free(ctx->perf.swap_samples);   ctx->perf.swap_samples = NULL;
 			free(ctx->perf.gap_samples);    ctx->perf.gap_samples = NULL;
 			free(ctx->perf.xsync_samples);  ctx->perf.xsync_samples = NULL;
 			free(ctx->perf.finish_samples); ctx->perf.finish_samples = NULL;
 			free(ctx->perf.gpu_samples);    ctx->perf.gpu_samples = NULL;
+			free(ctx->perf.gpu_sample_frame_seq); ctx->perf.gpu_sample_frame_seq = NULL;
 			ctx->perf.enabled = false;
 		}
 
@@ -331,7 +333,7 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_createGLContext(JNIEnv
 		 * Window summaries (default) stay in logcat; this adds raw per-frame rows
 		 * for end-to-end correlation with XloriePerf / SurfaceFlinger --latency.
 		 * Line format (units, with CLOCK_MONOTONIC timestamps from the swap call):
-		 *   frame,t_post_swap_ns,swap_us,gap_us,finish_us,xsync_us,gpu_us,mkcur_cumulative
+		 *   frame,t_post_swap_ns,swap_us,gap_us,finish_us,xsync_us,gpu_frame,gpu_us,mkcur_cumulative
 		 * `gpu_us` is 0 when GL_ARB_timer_query isn't available (virgl Mesa 25.2.8).
 		 * `mkcur_cumulative` is the running per-window makeCurrent counter — diff
 		 * across rows to reconstruct per-frame makeCurrent activity. */
@@ -343,7 +345,7 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_createGLContext(JNIEnv
 				fprintf(ctx->perf.csv_fp,
 					"# rlawt per-frame CSV, CLOCK_MONOTONIC ns / microseconds\n"
 					"# mkcur_cumulative is the per-window makeCurrent counter — diff rows for per-frame\n"
-					"frame,t_post_swap_ns,swap_us,gap_us,finish_us,xsync_us,gpu_us,mkcur_cumulative\n");
+					"frame,t_post_swap_ns,swap_us,gap_us,finish_us,xsync_us,gpu_frame,gpu_us,mkcur_cumulative\n");
 				fflush(ctx->perf.csv_fp);
 				RLAWT_LOG("[rlawt-info] per-frame CSV enabled path=%s\n", csv_path);
 			} else {
@@ -463,6 +465,7 @@ void rlawtContextFreePlatform(JNIEnv *env, AWTContext *ctx) {
 	free(ctx->perf.xsync_samples);  ctx->perf.xsync_samples = NULL;
 	free(ctx->perf.finish_samples); ctx->perf.finish_samples = NULL;
 	free(ctx->perf.gpu_samples);    ctx->perf.gpu_samples = NULL;
+	free(ctx->perf.gpu_sample_frame_seq); ctx->perf.gpu_sample_frame_seq = NULL;
 	free(ctx->perf.gpu_queries);    ctx->perf.gpu_queries = NULL;
 	if (ctx->perf.csv_fp) {
 		fclose(ctx->perf.csv_fp);
@@ -581,13 +584,16 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_swapBuffers(JNIEnv *en
 			ctx->perf.fpGetQueryObjectui64v(ctx->perf.gpu_queries[slot],
 				RLAWT_GL_QUERY_RESULT, &ns);
 			ctx->perf.gpu_samples[slot] = (uint64_t)(ns / 1000ULL);
+			ctx->perf.gpu_sample_frame_seq[slot] = ctx->perf.frame_idx - window + 1;
 			ctx->perf.gpu_valid_count++;
 		} else {
 			ctx->perf.gpu_samples[slot] = 0; /* sentinel: invalid */
+			ctx->perf.gpu_sample_frame_seq[slot] = 0;
 		}
 	} else if (ctx->perf.gpu_timer_available) {
 		/* First pass through the ring: no prior query to read; ensure sample is zeroed. */
 		ctx->perf.gpu_samples[slot] = 0;
+		ctx->perf.gpu_sample_frame_seq[slot] = 0;
 	}
 
 	/* Begin GPU query bracket (around finish+swap). */
@@ -638,10 +644,9 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_swapBuffers(JNIEnv *en
 	ctx->perf.frame_idx++;
 
 	/* S81 audit: per-frame CSV row. Writes the raw timestamps + stage costs for
-	 * this single frame so we can align individual frames across rlawt, Xlorie
-	 * XloriePerf, and SurfaceFlinger --latency. gpu_us comes from the last
-	 * completed timer-query (lagged by 2 frames); reads 0 if the query ring
-	 * hasn't primed yet or GL timers aren't available. xsync_us/finish_us read
+	 * this single frame so we can align individual frames across rlawt, Xlorie,
+	 * and Android presentation. gpu_frame explicitly identifies the older frame
+	 * owning a lagged timer-query result; it is 0 when unavailable. xsync_us/finish_us read
 	 * the slot that was just written above — 0 when the respective probe is
 	 * disabled. mkcur column is the running per-window counter; diff across
 	 * rows to get per-frame makeCurrent activity. */
@@ -650,14 +655,16 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_swapBuffers(JNIEnv *en
 		                     (uint64_t)t_post_swap.tv_nsec;
 		uint64_t xsync_us = ctx->perf.xsync_enabled ? ctx->perf.xsync_samples[slot] : 0;
 		uint64_t gpu_us   = ctx->perf.gpu_timer_available ? ctx->perf.gpu_samples[slot] : 0;
+		uint64_t gpu_frame = ctx->perf.gpu_timer_available ? ctx->perf.gpu_sample_frame_seq[slot] : 0;
 		fprintf(ctx->perf.csv_fp,
-			"%zu,%llu,%llu,%llu,%llu,%llu,%llu,%u\n",
+			"%zu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%u\n",
 			ctx->perf.frame_idx,
 			(unsigned long long)t_post_ns,
 			(unsigned long long)swap_us,
 			(unsigned long long)gap_us,
 			(unsigned long long)(ctx->perf.finish_enabled ? finish_us : 0),
 			(unsigned long long)xsync_us,
+			(unsigned long long)gpu_frame,
 			(unsigned long long)gpu_us,
 			ctx->perf.mkcur_count_window);
 	}

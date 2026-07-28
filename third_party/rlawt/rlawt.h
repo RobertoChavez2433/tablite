@@ -115,6 +115,7 @@ typedef struct {
 	uint64_t *xsync_samples;
 	uint64_t *finish_samples;
 	uint64_t *gpu_samples;   /* microseconds from GL timer query; 0 => invalid */
+	uint64_t *gpu_sample_frame_seq; /* producer frame owning each lagged GPU result */
 	size_t    gpu_valid_count; /* per-window count of valid GPU samples */
 
 	unsigned int *gpu_queries; /* GL query object IDs, window-sized ring */

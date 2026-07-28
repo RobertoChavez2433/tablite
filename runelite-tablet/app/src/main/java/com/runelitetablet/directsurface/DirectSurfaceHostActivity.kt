@@ -57,9 +57,22 @@ class DirectSurfaceHostActivity : ComponentActivity() {
                     AppLog.lifecycle("DirectSurfaceHost.surfaceCreated holder=$holder surface=$s isValid=${s.isValid}")
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                         runCatching {
-                            s.setFrameRate(120f, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                s.setFrameRate(
+                                    120f,
+                                    Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                                    Surface.CHANGE_FRAME_RATE_ALWAYS
+                                )
+                            } else {
+                                s.setFrameRate(120f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+                            }
                         }.onSuccess {
-                            AppLog.i(TAG, "DirectSurfaceHost.surfaceCreated setFrameRate(120Hz) OK")
+                            val activeMode = display?.mode
+                            AppLog.i(
+                                TAG,
+                                "DirectSurfaceHost.surfaceCreated setFrameRate(120Hz, compatibility=DEFAULT) OK " +
+                                    "activeMode=${activeMode?.modeId}:${activeMode?.refreshRate}Hz"
+                            )
                         }.onFailure {
                             AppLog.w(TAG, "DirectSurfaceHost.surfaceCreated setFrameRate(120Hz) failed: ${it.message}")
                         }

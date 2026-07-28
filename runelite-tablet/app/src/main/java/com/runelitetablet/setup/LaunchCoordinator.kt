@@ -16,6 +16,9 @@ import com.runelitetablet.directsurface.DirectSurfaceControlServer
 import com.runelitetablet.presentation.PresentationBackend
 import com.runelitetablet.session.RuneLiteSessionService
 import com.runelitetablet.session.SessionState
+import com.runelitetablet.telemetry.CaptureSessionRegistry
+import com.runelitetablet.telemetry.TelemetryExporter
+import com.runelitetablet.telemetry.TelemetryMode
 import com.runelitetablet.ui.DisplayPreferences
 import com.runelitetablet.ui.LaunchPreferences
 import kotlinx.coroutines.CancellationException
@@ -159,7 +162,24 @@ class LaunchCoordinator(
             return false
         }
         presentationBackend.applyLaunchPreferences(context, displayPreferences)
-        val useDirectSurface = launchPreferences.useDirectSurface
+        val rendererBackend = launchPreferences.rendererBackend
+        val telemetryMode = launchPreferences.telemetryMode
+        val targetHz = launchPreferences.targetHz
+        val captureSession = CaptureSessionRegistry.start(
+            backend = rendererBackend,
+            telemetryMode = telemetryMode,
+            targetHz = targetHz
+        )
+        TelemetryExporter.start(context.applicationContext, captureSession)
+        val capture = captureSession.manifest
+        val useDirectSurface = rendererBackend == com.runelitetablet.telemetry.RendererBackend.DIRECT_VIRGL_AHB ||
+            rendererBackend == com.runelitetablet.telemetry.RendererBackend.DIRECT_ZINK_AHB
+        logger?.state(
+            "CAPTURE-START runId=${capture.runId} backend=${capture.backend} mode=${capture.telemetryMode} " +
+                "targetHz=${capture.targetHz} monotonicNs=${capture.clocks.monotonicNs} " +
+                "boottimeNs=${capture.clocks.boottimeNs} bootId=${capture.clocks.bootId}",
+            correlationId = correlationId
+        )
         val presentationIntent = presentationBackend.createLaunchIntent(context)
         if (useDirectSurface) {
             DirectSurfaceControlServer.ensureStarted(context.applicationContext)
@@ -195,25 +215,57 @@ class LaunchCoordinator(
             // per-frame row dump. Two clock_gettimes + one fprintf per swap, line-
             // buffered; negligible overhead. Enables end-to-end frame alignment
             // between rlawt, XloriePerf, and SurfaceFlinger --latency.
+            val rlawtPerf = if (telemetryMode == TelemetryMode.OFF) 0 else 1
+            val perfSampler = if (telemetryMode == TelemetryMode.OFF) 0 else 1
+            val rawFrameCsv = if (telemetryMode == TelemetryMode.BURST || telemetryMode == TelemetryMode.DEEP) {
+                "RLAWT_PERF_CSV=\$HOME/.rlt/captures/${capture.runId}/rlawt-perframe.csv "
+            } else {
+                ""
+            }
             val cmdLine = "RLT_NATIVE_TERMUX=1 RLT_UI_SCALE=$uiScale RLT_GAME_SIZE_W=$gameW RLT_GAME_SIZE_H=$gameH " +
-                "RLT_PERF_SAMPLE=1 RLAWT_PERF=1 RLAWT_PERF_CSV=\$HOME/rlawt-perframe.csv " +
+                "RLT_CAPTURE_ID=${capture.runId} RLT_TELEMETRY_MODE=${capture.telemetryMode} " +
+                "RLT_RENDERER_BACKEND=${capture.backend} RLT_TARGET_HZ=${capture.targetHz} " +
+                "RLT_CAPTURE_DIR=\$HOME/.rlt/captures/${capture.runId} " +
+                "RLT_PERF_SAMPLE=$perfSampler RLAWT_PERF=$rlawtPerf $rawFrameCsv" +
                 "exec \"$scriptPath\"$envFileArg"
-            logger?.state("launchInternal: dispatching native-path command scriptPath=$scriptPath envFile=$envFilePath uiScale=$uiScale gameSize=${gameW}x${gameH} backend=${presentationBackend.id}", correlationId = correlationId)
+            logger?.state(
+                "launchInternal: dispatching native-path command scriptPath=$scriptPath hasEnvFile=${envFilePath != null} " +
+                    "uiScale=$uiScale gameSize=${gameW}x${gameH} presentation=${presentationBackend.id} " +
+                    "renderer=${capture.backend} telemetry=${capture.telemetryMode} targetHz=${capture.targetHz} runId=${capture.runId}",
+                correlationId = correlationId
+            )
             // S82 telemetry surface — log every artifact the new launcher will produce, so a single
             // logcat grep ("TELEMETRY-ARTIFACT") gives the on-device paths without re-reading the script.
             // Paths are relative to Termux $HOME = /data/data/com.termux/files/home unless overridden.
             val termuxHome = "/data/data/com.termux/files/home"
+            val captureDir = "$termuxHome/.rlt/captures/${capture.runId}"
+            logger?.state("TELEMETRY-ARTIFACT: capture-dir=$captureDir", correlationId = correlationId)
             logger?.state("TELEMETRY-ARTIFACT: launcher-log=$termuxHome/runelite-native.log", correlationId = correlationId)
-            logger?.state("TELEMETRY-ARTIFACT: rlawt-perframe-csv=$termuxHome/rlawt-perframe.csv", correlationId = correlationId)
+            if (rawFrameCsv.isNotEmpty()) {
+                logger?.state("TELEMETRY-ARTIFACT: rlawt-perframe-csv=$captureDir/rlawt-perframe.csv", correlationId = correlationId)
+            }
             logger?.state("TELEMETRY-ARTIFACT: affinity-timeline-csv=$termuxHome/affinity-timeline.csv", correlationId = correlationId)
             logger?.state("TELEMETRY-ARTIFACT: thread-cpu-csv=$termuxHome/thread-cpu.csv", correlationId = correlationId)
             logger?.state("TELEMETRY-ARTIFACT: x11-window-state-log=$termuxHome/x11-window-state.log", correlationId = correlationId)
-            logger?.state("TELEMETRY-ARTIFACT: rlawt-summary-verdict=tail-of-runelite-native.log (RLAWT-SUMMARY:)", correlationId = correlationId)
+            logger?.state("TELEMETRY-ARTIFACT: rlawt-summary-observation=tail-of-runelite-native.log (RLAWT-SUMMARY:)", correlationId = correlationId)
             commandRunner.launchBackground(commandPath = bashPath, arguments = arrayOf("-c", cmdLine))
         } else {
-            val arguments = if (envFilePath != null) arrayOf(envFilePath) else null
-            logger?.state("launchInternal: dispatching proot-path command scriptPath=$scriptPath envFile=$envFilePath backend=${presentationBackend.id}", correlationId = correlationId)
-            commandRunner.launchBackground(commandPath = scriptPath, arguments = arguments)
+            val bashPath = "${CommandRunner.TERMUX_BIN_PATH}/bash"
+            val envFileArg = envFilePath?.let { " \"$it\"" } ?: ""
+            val cmdLine = "RLT_CAPTURE_ID=${capture.runId} " +
+                "RLT_TELEMETRY_MODE=${capture.telemetryMode} " +
+                "RLT_RENDERER_BACKEND=${capture.backend} " +
+                "RLT_TARGET_HZ=${capture.targetHz} " +
+                "RLT_CAPTURE_DIR=\$HOME/.rlt/captures/${capture.runId} " +
+                "exec \"$scriptPath\"$envFileArg"
+            logger?.state(
+                "launchInternal: dispatching proot-path command scriptPath=$scriptPath " +
+                    "hasEnvFile=${envFilePath != null} presentation=${presentationBackend.id} " +
+                    "renderer=${capture.backend} telemetry=${capture.telemetryMode} " +
+                    "targetHz=${capture.targetHz} runId=${capture.runId}",
+                correlationId = correlationId
+            )
+            commandRunner.launchBackground(commandPath = bashPath, arguments = arrayOf("-c", cmdLine))
         }
         logger?.state("launchInternal: command dispatched success=$success useNative=$useNative", correlationId = correlationId)
         if (success && presentationIntent != null && presentationBackend.shouldWaitForReadySignal() && !useDirectSurface) {

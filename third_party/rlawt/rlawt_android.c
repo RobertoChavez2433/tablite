@@ -28,6 +28,7 @@
 
 #include "rlawt.h"
 #include "rlawt_surface_protocol.h"
+#include "rlt_frame_trace.h"
 
 #include <jawt_md.h>
 #include <android/hardware_buffer.h>
@@ -795,7 +796,7 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_createGLContext(JNIEnv
 			setvbuf(ctx->csv_fp, NULL, _IOLBF, 0);
 			fprintf(ctx->csv_fp,
 				"# rlawt-android per-frame CSV CLOCK_MONOTONIC ns / us\n"
-				"frame,t_post_swap_ns,swap_us,gap_us,index\n");
+				"frame,t_post_swap_ns,swap_us,gap_us,finish_us,send_us,reuse_wait_us,submitted_index,next_index\n");
 			ctx->csv_enabled = true;
 			RLAWT_LOG("per-frame CSV enabled %s\n", csv);
 		}
@@ -970,6 +971,7 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_swapBuffers(JNIEnv *en
 	clock_gettime(CLOCK_MONOTONIC, &t_post);
 	uint64_t finish_us = ts_delta_us(&t_after_finish, &t_pre);
 	uint64_t send_us   = ts_delta_us(&t_after_send, &t_after_finish);
+	uint64_t reuse_wait_us = ts_delta_us(&t_post, &t_after_send);
 	uint64_t swap_us   = ts_delta_us(&t_post, &t_pre);
 	uint64_t gap_us = 0;
 	if (ctx->last_post_swap_ts.tv_sec || ctx->last_post_swap_ts.tv_nsec) {
@@ -992,10 +994,12 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_swapBuffers(JNIEnv *en
 
 	if (ctx->csv_enabled && ctx->csv_fp) {
 		uint64_t t_post_ns = (uint64_t)t_post.tv_sec * 1000000000ULL + (uint64_t)t_post.tv_nsec;
-		fprintf(ctx->csv_fp, "%u,%llu,%llu,%llu,%u\n",
+		fprintf(ctx->csv_fp, "%u,%llu,%llu,%llu,%llu,%llu,%llu,%u,%u\n",
 			ctx->frame_seq, (unsigned long long)t_post_ns,
 			(unsigned long long)swap_us, (unsigned long long)gap_us,
-			ctx->current_index);
+			(unsigned long long)finish_us, (unsigned long long)send_us,
+			(unsigned long long)reuse_wait_us,
+			fr.index, ctx->current_index);
 	}
 }
 

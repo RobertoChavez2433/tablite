@@ -9,7 +9,7 @@ import java.io.File
 
 object AppLog : Logger {
     private const val TAG = "RLT"
-    private val PERF_TAGS = setOf("FRAME", "JANK", "SURFACE", "GL", "BUFFER")
+    private val PERF_TAGS = setOf("FRAME", "HOST_VSYNC", "JANK", "SURFACE", "GL", "BUFFER")
     private var fileWriter: LogFileWriter = LogFileWriter(null)
     private var perfWriter: LogFileWriter = LogFileWriter(null)
     private var debugServer: DebugLogServer? = null

@@ -27,6 +27,14 @@ interface Logger {
     fun frame(fps: Double, jankCount: Int, p99Ms: Double, heapMb: Int, message: String, correlationId: String? = null) =
         i("FRAME", "fps=%.1f jank=%d p99=%.1fms heap=%dMB %s".format(fps, jankCount, p99Ms, heapMb, message), correlationId)
 
+    fun hostVsync(callbackRate: Double, missedDeadlines: Int, p99Ms: Double, targetHz: Int, message: String, correlationId: String? = null) =
+        i(
+            "HOST_VSYNC",
+            "host_vsync_callback_rate=%.1f missed_deadlines=%d p99=%.1fms target_hz=%d %s"
+                .format(callbackRate, missedDeadlines, p99Ms, targetHz, message),
+            correlationId
+        )
+
     fun jank(frameTimeMs: Double, expectedMs: Double, frameNumber: Long, message: String, correlationId: String? = null) =
         w("JANK", "frame=%d actual=%.1fms expected=%.1fms %s".format(frameNumber, frameTimeMs, expectedMs, message), correlationId)
 

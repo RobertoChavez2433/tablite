@@ -522,6 +522,12 @@ static CARD32 lorieFramecounter(unused OsTimerPtr timer, unused CARD32 time, unu
     uint32_t ahbUnlockCalls = __sync_lock_test_and_set(&gAhbUnlockCalls, 0);
     uint32_t ahbStickyHits = __sync_lock_test_and_set(&gAhbStickyHits, 0);
     uint32_t ahbFlushSkipped = __sync_lock_test_and_set(&gAhbFlushSkipped, 0);
+    struct timespec heartbeatTs;
+    clock_gettime(CLOCK_MONOTONIC, &heartbeatTs);
+    uint64_t heartbeatNs = (uint64_t) heartbeatTs.tv_sec * 1000000000ULL +
+        (uint64_t) heartbeatTs.tv_nsec;
+    log(INFO, "RendererHeartbeat: monotonic_ns=%llu rendered=%u choreographer_callbacks=%u",
+        (unsigned long long) heartbeatNs, pvfb->state->renderedFrames, choreographerCallbacks);
     log(INFO, "choreographer callbacks in 5.0 seconds = %.1f FPS", ((float) choreographerCallbacks) / 5.0f);
     log(INFO, "redraw wakeups in 5.0 seconds = %.1f FPS", ((float) redrawWakeups) / 5.0f);
     log(INFO, "damage-triggered redraws in 5.0 seconds = %.1f FPS", ((float) damageRequests) / 5.0f);

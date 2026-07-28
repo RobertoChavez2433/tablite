@@ -5,10 +5,13 @@ import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.os.Debug
+import android.os.Process
 import android.content.Intent
 import android.preference.PreferenceManager
 import android.view.Choreographer
 import android.view.Gravity
+import android.view.SurfaceControl
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -28,6 +31,12 @@ import com.runelitetablet.logging.PerfSnapshots
 import com.runelitetablet.domain.command.CommandRunner
 import com.runelitetablet.perf.CpuBooster
 import com.runelitetablet.perf.PerfDashboard
+import com.runelitetablet.telemetry.CaptureSessionRegistry
+import com.runelitetablet.telemetry.TelemetryExporter
+import com.runelitetablet.telemetry.FrameEventType
+import com.runelitetablet.telemetry.FrameOutcome
+import com.runelitetablet.telemetry.FrameStage
+import com.runelitetablet.ui.LaunchPreferences
 import com.termux.x11.LorieView
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -52,15 +61,29 @@ class HybridX11HostActivity : ComponentActivity() {
     private var cpuBooster: CpuBooster? = null
     private var commandRunner: CommandRunner? = null
     private var cpuBoostAttempted = false
-    private val frameTracker = FrameTimingTracker()
+    private var jankRegistration: SurfaceControl.OnJankDataListenerRegistration? = null
+    private var jankRegistrationAttempts = 0
+    private val targetHz: Int by lazy { LaunchPreferences(this).targetHz }
+    private val frameTracker: FrameTimingTracker by lazy { FrameTimingTracker(targetHz = targetHz) }
     private var frameCount = 0L
     private var lastFrameLogCount = 0L
     private var previousFrameTimeNanos = 0L
     private var frameSessionId: String? = null
-    private val jankThresholdMs = 12.0
-    private val jankThresholdNs = (jankThresholdMs * 1_000_000).toLong()
+    private val deadlineNs: Long by lazy { frameTracker.deadlineNs() + 100_000L }
     private val frameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
+            val priorFrameTime = previousFrameTimeNanos
+            val callbackMissed = priorFrameTime > 0 && frameTimeNanos - priorFrameTime > deadlineNs
+            CaptureSessionRegistry.active?.recorder?.record(
+                threadId = Process.myTid(),
+                frameSeq = 0,
+                stage = FrameStage.HOST_VSYNC_CALLBACK,
+                eventType = if (priorFrameTime > 0) FrameEventType.SPAN else FrameEventType.INSTANT,
+                outcome = if (callbackMissed) FrameOutcome.TIMED_OUT else FrameOutcome.ACCEPTED,
+                beginMonotonicNs = if (priorFrameTime > 0) priorFrameTime else frameTimeNanos,
+                endMonotonicNs = frameTimeNanos,
+                threadCpuTimeNs = Debug.threadCpuTimeNanos()
+            )
             frameTracker.recordFrame(frameTimeNanos)
             frameCount++
             if (BuildConfig.DEBUG && frameCount % 120 == 0L) {
@@ -71,23 +94,17 @@ class HybridX11HostActivity : ComponentActivity() {
             if (frameCount - lastFrameLogCount >= 120) {
                 lastFrameLogCount = frameCount
                 val fps = frameTracker.getAverageFps()
-                val jankCount = frameTracker.getJankFrameCount()
+                val missedDeadlines = frameTracker.getMissedDeadlineCount()
                 val p99 = frameTracker.getFrameTimePercentile(99.0)
                 val heapMb = (Runtime.getRuntime().let { it.totalMemory() - it.freeMemory() } / 1_048_576L).toInt()
-                AppLog.frame(fps, jankCount, p99, heapMb, "periodic", sessionId)
+                AppLog.hostVsync(fps, missedDeadlines, p99, targetHz, "periodic heap=${heapMb}MB", sessionId)
                 val freeMemMb = (Runtime.getRuntime().freeMemory() / (1024 * 1024)).toInt()
-                if (heapMb > 128 && jankCount > 2) {
-                    AppLog.perf("MEMORY_PRESSURE: heap=${heapMb}MB free=${freeMemMb}MB concurrent_jank=$jankCount fps=$fps")
+                if (heapMb > 128 && missedDeadlines > 2) {
+                    AppLog.perf("MEMORY_PRESSURE: heap=${heapMb}MB free=${freeMemMb}MB host_vsync_misses=$missedDeadlines callbackRate=$fps")
                 }
             }
-            // Log individual jank frames
-            if (previousFrameTimeNanos > 0) {
-                val deltaNs = frameTimeNanos - previousFrameTimeNanos
-                if (deltaNs > jankThresholdNs) {
-                    val frameTimeMs = deltaNs / 1_000_000.0
-                    AppLog.jank(frameTimeMs, jankThresholdMs, frameCount, "exceeded threshold", sessionId)
-                }
-            }
+            // Per-callback misses stay in the binary recorder. Logcat receives
+            // only the one-second aggregate above.
             previousFrameTimeNanos = frameTimeNanos
             try {
                 Choreographer.getInstance().postFrameCallback(this)
@@ -103,6 +120,45 @@ class HybridX11HostActivity : ComponentActivity() {
         }
         AppLog.d("HYBRID_X11", "prefListener: preference changed, reloading")
         lorieView.reloadPreferences(prefs)
+    }
+
+    private fun registerJankListenerWhenAttached() {
+        if (Build.VERSION.SDK_INT < 36 || !lifecycleActive || jankRegistration != null) return
+        val attachedSurface = rootView.rootSurfaceControl
+        if (attachedSurface == null) {
+            jankRegistrationAttempts++
+            if (jankRegistrationAttempts < MAX_JANK_REGISTRATION_ATTEMPTS) {
+                rootView.postDelayed(::registerJankListenerWhenAttached, JANK_REGISTRATION_RETRY_MS)
+            } else {
+                AppLog.w("HOST_VSYNC", "Android 16 OnJankDataListener registration unavailable after attachment retries")
+            }
+            return
+        }
+
+        jankRegistration = attachedSurface.registerOnJankDataListener(mainExecutor) { batch ->
+            val recorder = CaptureSessionRegistry.active?.recorder ?: return@registerOnJankDataListener
+            val threadId = Process.myTid()
+            val threadCpuNs = Debug.threadCpuTimeNanos()
+            batch.forEach { data ->
+                recorder.record(
+                    threadId = threadId,
+                    frameSeq = 0,
+                    stage = FrameStage.ANDROID_JANK_CLASSIFICATION,
+                    eventType = FrameEventType.SPAN,
+                    outcome = if (data.jankType == SurfaceControl.JankData.JANK_NONE) {
+                        FrameOutcome.PRESENTED
+                    } else {
+                        FrameOutcome.TIMED_OUT
+                    },
+                    beginMonotonicNs = data.scheduledAppFrameTimeNanos,
+                    endMonotonicNs = data.actualAppFrameTimeNanos,
+                    threadCpuTimeNs = threadCpuNs,
+                    platformFrameId = data.vsyncId,
+                    flags = data.jankType.toLong()
+                )
+            }
+        }
+        AppLog.i("HOST_VSYNC", "Android 16 OnJankDataListener registration=active attempts=$jankRegistrationAttempts")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -131,6 +187,7 @@ class HybridX11HostActivity : ComponentActivity() {
         if (!loadResult.loaded) { showFailure(loadResult.summary()); return }
 
         initViews()
+        ensureCaptureSession()
         initAttachController()
         observeBridgeState()
         val container = (application as com.runelitetablet.RuneLiteTabletApp).container
@@ -191,6 +248,22 @@ class HybridX11HostActivity : ComponentActivity() {
             insets
         }
         updateStatus("loaded Xlorie from ${loadResult.loadedFrom}")
+    }
+
+    private fun ensureCaptureSession() {
+        if (CaptureSessionRegistry.active != null) return
+        val preferences = LaunchPreferences(this)
+        val session = CaptureSessionRegistry.start(
+            backend = preferences.rendererBackend,
+            telemetryMode = preferences.telemetryMode,
+            targetHz = preferences.targetHz
+        )
+        TelemetryExporter.start(applicationContext, session)
+        val capture = session.manifest
+        AppLog.state(
+            "CAPTURE-START runId=${capture.runId} backend=${capture.backend} mode=${capture.telemetryMode} " +
+                "targetHz=${capture.targetHz} source=hybrid-host"
+        )
     }
 
     private fun initViews() {
@@ -299,6 +372,8 @@ class HybridX11HostActivity : ComponentActivity() {
 
     private companion object {
         const val BINDER_DIED_ESCAPE_HATCH_MS = 3_000L
+        const val MAX_JANK_REGISTRATION_ATTEMPTS = 10
+        const val JANK_REGISTRATION_RETRY_MS = 100L
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -315,8 +390,17 @@ class HybridX11HostActivity : ComponentActivity() {
         super.onResume()
         lifecycleActive = true
         frameSessionId = "frames-" + UUID.randomUUID().toString().take(4)
+        frameTracker.reset()
+        frameCount = 0L
+        lastFrameLogCount = 0L
         previousFrameTimeNanos = 0L
         Choreographer.getInstance().postFrameCallback(frameCallback)
+        if (Build.VERSION.SDK_INT >= 36) {
+            jankRegistration?.removeAfter(0)
+            jankRegistration = null
+            jankRegistrationAttempts = 0
+            rootView.post(::registerJankListenerWhenAttached)
+        }
         attachController.startAttachLoop(lifecycleScope)
         // Phase 2C: Lifecycle parity — reload preferences and notify connection state on resume
         // (upstream MainActivity does this; prevents legacy_drawing regression after backgrounding)
@@ -358,6 +442,11 @@ class HybridX11HostActivity : ComponentActivity() {
 
     override fun onPause() {
         lifecycleActive = false
+        if (Build.VERSION.SDK_INT >= 36) {
+            jankRegistration?.flush()
+            jankRegistration?.removeAfter(0)
+            jankRegistration = null
+        }
         perfDashboard?.stop()
         Choreographer.getInstance().removeFrameCallback(frameCallback)
         frameSessionId = null

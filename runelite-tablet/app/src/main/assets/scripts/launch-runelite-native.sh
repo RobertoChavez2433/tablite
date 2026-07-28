@@ -1,11 +1,4 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Validation gate for the rlawt-on-Surface bring-up. Touch
-# $HOME/.rlt/.use-direct-surface (or run `run-as com.termux touch ...`) to
-# enable on the next launch; remove the file to revert to the GLX path.
-# Cheap stat, no behavior change when absent. Lives at the top of the file
-# so injection survives ScriptManager's deploy/marker logic without an APK
-# rebuild.
-[ -f "$HOME/.rlt/.use-direct-surface" ] && export RLT_DIRECT_SURFACE=1
 # launch-runelite-native.sh — Phase 2.1 native-Termux RuneLite launcher.
 #
 # This is the proot-free path. It bypasses proot-distro entirely, runs the
@@ -45,9 +38,31 @@ export PATH="$PREFIX/bin:$PATH"
 export TMPDIR="${TMPDIR:-$PREFIX/tmp}"
 mkdir -p "$TMPDIR"
 
+# Shared capture contract. The app normally supplies these values; direct
+# shell launches get safe defaults so every artifact still has one identity.
+RLT_CAPTURE_ID="${RLT_CAPTURE_ID:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || printf 'manual-%s-%s' "$(date +%s)" "$$")}"
+RLT_TELEMETRY_MODE="${RLT_TELEMETRY_MODE:-SUMMARY}"
+RLT_TARGET_HZ="${RLT_TARGET_HZ:-120}"
+RLT_RENDERER_BACKEND="${RLT_RENDERER_BACKEND:-native_x11_virgl_gpu}"
+RLT_CAPTURE_DIR="${RLT_CAPTURE_DIR:-$HOME/.rlt/captures/$RLT_CAPTURE_ID}"
+export RLT_CAPTURE_ID RLT_TELEMETRY_MODE RLT_RENDERER_BACKEND RLT_TARGET_HZ RLT_CAPTURE_DIR
+case "$RLT_RENDERER_BACKEND" in
+    direct_virgl_ahb|direct_zink_ahb) export RLT_DIRECT_SURFACE=1 ;;
+    *) unset RLT_DIRECT_SURFACE ;;
+esac
+mkdir -p "$RLT_CAPTURE_DIR"
+
 LOGFILE="$HOME/runelite-native.log"
 CLASSLOAD_LOG="$HOME/native-launch-classload.log"
 echo "=== Native RuneLite launch $(date) ===" | tee "$LOGFILE"
+printf '%s\n' \
+    "capture_id=$RLT_CAPTURE_ID" \
+    "telemetry_mode=$RLT_TELEMETRY_MODE" \
+    "renderer_backend=$RLT_RENDERER_BACKEND" \
+    "target_hz=$RLT_TARGET_HZ" \
+    "capture_dir=$RLT_CAPTURE_DIR" \
+    > "$RLT_CAPTURE_DIR/launcher-context.txt"
+echo "CAPTURE: id=$RLT_CAPTURE_ID mode=$RLT_TELEMETRY_MODE backend=$RLT_RENDERER_BACKEND target_hz=$RLT_TARGET_HZ dir=$RLT_CAPTURE_DIR" | tee -a "$LOGFILE"
 
 # Optional env-file argument (parity with launch-runelite.sh). LaunchCoordinator
 # writes Jagex auth env to $HOME/.rlt-launch-env.sh and passes its path as $1.
@@ -817,12 +832,16 @@ if [[ "${RLT_DIRECT_SURFACE:-0}" == "1" ]]; then
     export RLAWT_ACTIVITY_CONTROL_HOST="${RLAWT_ACTIVITY_CONTROL_HOST:-127.0.0.1}"
     export RLAWT_ACTIVITY_CONTROL_PORT="${RLAWT_ACTIVITY_CONTROL_PORT:-49382}"
     export RLAWT_ACTIVITY_CONTROL_NAME="${RLAWT_ACTIVITY_CONTROL_NAME:-rlt-direct-control}"
-    # Per-frame CSV side-file for swap_us/gap_us correlation.
-    export RLAWT_PERF_CSV="${LOGDIR:-$HOME/.rlt-logs}/rlawt-direct-surface-frames.csv"
-    mkdir -p "$(dirname "$RLAWT_PERF_CSV")"
+    # Raw per-frame CSV is invasive and only enabled for BURST/DEEP captures.
+    if [[ "$RLT_TELEMETRY_MODE" == "BURST" || "$RLT_TELEMETRY_MODE" == "DEEP" ]]; then
+        export RLAWT_PERF_CSV="${RLAWT_PERF_CSV:-$RLT_CAPTURE_DIR/rlawt-direct-surface-frames.csv}"
+        mkdir -p "$(dirname "$RLAWT_PERF_CSV")"
+    else
+        unset RLAWT_PERF_CSV
+    fi
     echo "  RLAWT_INITIAL_WIDTH=$RLAWT_INITIAL_WIDTH RLAWT_INITIAL_HEIGHT=$RLAWT_INITIAL_HEIGHT" | tee -a "$LOGFILE"
     echo "  RLAWT_ACTIVITY_CONTROL=${RLAWT_ACTIVITY_CONTROL_HOST}:${RLAWT_ACTIVITY_CONTROL_PORT} local_fallback=@$RLAWT_ACTIVITY_CONTROL_NAME" | tee -a "$LOGFILE"
-    echo "  RLAWT_PERF_CSV=$RLAWT_PERF_CSV" | tee -a "$LOGFILE"
+    echo "  RLAWT_PERF_CSV=${RLAWT_PERF_CSV:-disabled}" | tee -a "$LOGFILE"
     echo "  DIRECT-SURFACE-DIAG LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>} PATH=$PATH" | tee -a "$LOGFILE"
     if command -v sha256sum >/dev/null 2>&1; then
         echo "  DIRECT-SURFACE-DIAG rlawt-jar-sha256=$(sha256sum "$RLAWT_BIONIC_JAR" | awk '{print $1}')" | tee -a "$LOGFILE"
@@ -844,7 +863,18 @@ if [[ "${RLT_DIRECT_SURFACE:-0}" == "1" ]]; then
 fi
 
 echo "=== Invoking JVM ===" | tee -a "$LOGFILE"
-echo "  cmd: $JAVA_BIN ${JVM_ARGS[*]} -cp <classpath> $MAIN_CLASS $CLIENT_ARGS" | tee -a "$LOGFILE"
+SAFE_JVM_ARGS=()
+for arg in "${JVM_ARGS[@]}"; do
+    case "$arg" in
+        -DJX_SESSION_ID=*|-DJX_CHARACTER_ID=*|-DJX_DISPLAY_NAME=*)
+            SAFE_JVM_ARGS+=("${arg%%=*}=***")
+            ;;
+        *)
+            SAFE_JVM_ARGS+=("$arg")
+            ;;
+    esac
+done
+echo "  cmd: $JAVA_BIN ${SAFE_JVM_ARGS[*]} -cp <classpath> $MAIN_CLASS $CLIENT_ARGS" | tee -a "$LOGFILE"
 : > "$CLASSLOAD_LOG"
 "$JAVA_BIN" "${JVM_ARGS[@]}" -cp "$FULL_CLASSPATH" "$MAIN_CLASS" $CLIENT_ARGS >> "$LOGFILE" 2>&1 &
 JAVA_PID=$!
@@ -906,16 +936,16 @@ rlt_apply_affinity "VIRGL" "${VIRGL_PID:-}" 0xF0
 # the data is always captured even if a tooling dep (xprop, top -H,
 # etc.) is missing.
 #
-# Files (all under $HOME, easy to pull via run-as):
+# Files (all under the run-scoped capture directory):
 #   affinity-timeline.csv  — 1Hz for first 60s, 10s after, until JVM dies
 #   thread-cpu.csv         — top-N JVM threads by CPU% every 5s
 #   x11-window-state.log   — one-shot xprop dump of RuneLite frame at T+10s
 #
 # All three exit cleanly when /proc/$JAVA_PID disappears.
 # ===================================================================
-AFFINITY_TIMELINE_CSV="$HOME/affinity-timeline.csv"
-THREAD_CPU_CSV="$HOME/thread-cpu.csv"
-X11_WINDOW_STATE_LOG="$HOME/x11-window-state.log"
+AFFINITY_TIMELINE_CSV="$RLT_CAPTURE_DIR/affinity-timeline.csv"
+THREAD_CPU_CSV="$RLT_CAPTURE_DIR/thread-cpu.csv"
+X11_WINDOW_STATE_LOG="$RLT_CAPTURE_DIR/x11-window-state.log"
 AFFINITY_TIMELINE_PID=""
 THREAD_CPU_SAMPLER_PID=""
 X11_WINDOW_PROBE_PID=""
@@ -993,7 +1023,7 @@ start_affinity_timeline() {
 start_thread_cpu_sampler() {
     : > "$THREAD_CPU_CSV"
     echo "ts,tid,comm,cpu_pct" >> "$THREAD_CPU_CSV"
-    local raw_log="$HOME/thread-cpu-raw.log"
+    local raw_log="$RLT_CAPTURE_DIR/thread-cpu-raw.log"
     : > "$raw_log"
     local has_proc_top=""
     # `top -b -H -n 1 -p $JAVA_PID` works on procps. Detect by trying once
@@ -1141,12 +1171,11 @@ probe_x11_window_state() {
     echo "TELEMETRY: x11-window probe PID=$X11_WINDOW_PROBE_PID log=$X11_WINDOW_STATE_LOG (fires at T+10s)" | tee -a "$LOGFILE"
 }
 
-# rlawt CSV summary — runs at exit. Computes mean swap_us, mean gap_us, ratio,
-# and a fps estimate. The ratio is the discriminator we discussed:
-#   swap_us >> gap_us  → IPC-bound (swap blocks waiting for vtest ack)
-#   swap_us ≈ gap_us   → CPU-bound (frame work dominates, swap is fast)
+# rlawt CSV summary — runs at exit for BURST/DEEP captures. Swap/gap
+# proportions are observations only; neither proves a CPU nor IPC bottleneck
+# without scheduler, GPU, transport, and presentation evidence.
 summarize_rlawt_swap_gap() {
-    local csv="$HOME/rlawt-perframe.csv"
+    local csv="${RLAWT_PERF_CSV:-$RLT_CAPTURE_DIR/rlawt-perframe.csv}"
     [ -f "$csv" ] || { echo "RLAWT-SUMMARY: csv missing at $csv" | tee -a "$LOGFILE"; return; }
     local rows
     rows=$(wc -l < "$csv" 2>/dev/null || echo 0)
@@ -1173,13 +1202,7 @@ summarize_rlawt_swap_gap() {
                 ratio = (gap_mean > 0) ? swap_mean / gap_mean : -1
                 printf "RLAWT-SUMMARY: n=%d swap_us mean=%.0f max=%.0f gap_us mean=%.0f max=%.0f ratio=%.2f cycle_us=%.0f fps_estimate=%.2f\n", \
                     n, swap_mean, swap_max, gap_mean, gap_max, ratio, cycle, fps
-                if (ratio > 4.0) {
-                    print "RLAWT-SUMMARY: verdict=IPC-bound (swap_us dominates — virgl/Mesa flush is the bottleneck)"
-                } else if (ratio < 1.5) {
-                    print "RLAWT-SUMMARY: verdict=CPU-bound (gap_us comparable to swap_us — render work caps frame rate)"
-                } else {
-                    print "RLAWT-SUMMARY: verdict=mixed (swap and gap balanced — bottleneck unclear, look at thread-cpu.csv)"
-                }
+                print "RLAWT-SUMMARY: classification=unknown confidence=insufficient (swap/gap ratio alone is non-causal)"
             }' | tee -a "$LOGFILE"
 }
 
@@ -1193,7 +1216,7 @@ if [ "${RLT_PERF_SAMPLE:-0}" = "1" ]; then
     # but the RuneLite FpsPlugin overlay value is never written to the log (it's a
     # pixel overlay on the game canvas). rlawt [rlawt-perf] + XloriePerf give us
     # producer and consumer FPS via real signals; we rely on those instead.
-    PERF_SAMPLER_LOG="$HOME/runelite-native-perf.log"
+    PERF_SAMPLER_LOG="$RLT_CAPTURE_DIR/system-sampler.log"
     : > "$PERF_SAMPLER_LOG"
     "$HOME/scripts/perf-sampler.sh" "$JAVA_PID" "${VIRGL_PID:-}" 1 "$PERF_SAMPLER_LOG" "${GPU_BUSY_PATH:-}" >/dev/null 2>&1 &
     PERF_SAMPLER_PID=$!

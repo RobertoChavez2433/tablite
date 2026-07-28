@@ -10,6 +10,8 @@ import java.security.MessageDigest
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Lightweight WebSocket debug server on configurable port (default 8099).
@@ -26,6 +28,8 @@ class DebugLogServer(private val port: Int = DEFAULT_PORT) {
     private var sendThread: Thread? = null
     private val clients = CopyOnWriteArrayList<WsClient>()
     private val sendQueue = ConcurrentLinkedQueue<ByteArray>()
+    private val queuedFrames = AtomicInteger(0)
+    private val droppedFrames = AtomicLong(0)
     private val startTimeMs = System.currentTimeMillis()
 
     /** Callback for native log lines (XloriePerf, etc). Set by PerfDashboard to receive renderer stats. */
@@ -46,6 +50,7 @@ class DebugLogServer(private val port: Int = DEFAULT_PORT) {
         clients.forEach { it.close() }
         clients.clear()
         sendQueue.clear()
+        queuedFrames.set(0)
     }
 
     /**
@@ -54,13 +59,21 @@ class DebugLogServer(private val port: Int = DEFAULT_PORT) {
      */
     fun broadcast(json: String) {
         if (clients.isEmpty()) return
+        if (queuedFrames.get() >= MAX_QUEUED_FRAMES) {
+            droppedFrames.incrementAndGet()
+            return
+        }
         sendQueue.offer(encodeWsFrame(json))
-        // Cap queue to prevent unbounded growth when no clients are draining fast enough
-        while (sendQueue.size > 500) sendQueue.poll()
+        val depth = queuedFrames.incrementAndGet()
+        if (depth > MAX_QUEUED_FRAMES) {
+            if (sendQueue.poll() != null) queuedFrames.decrementAndGet()
+            droppedFrames.incrementAndGet()
+        }
     }
 
     val isRunning: Boolean get() = running.get()
     val clientCount: Int get() = clients.size
+    val droppedEventCount: Long get() = droppedFrames.get()
 
     private fun sendLoop() {
         while (running.get()) {
@@ -69,6 +82,7 @@ class DebugLogServer(private val port: Int = DEFAULT_PORT) {
                 Thread.sleep(10) // Avoid busy spin
                 continue
             }
+            queuedFrames.decrementAndGet()
             val dead = mutableListOf<WsClient>()
             for (client in clients) {
                 try { client.send(frame) } catch (_: Exception) { dead.add(client) }
@@ -178,7 +192,7 @@ class DebugLogServer(private val port: Int = DEFAULT_PORT) {
             val process = Runtime.getRuntime().exec(arrayOf(
                 "logcat", "-v", "threadtime", "-s",
                 "LorieNative:V", "gles-renderer:V", "XlorieCaps:V", "Xlorie:V",
-                "RLClient:V"
+                "RlawtSurface:V", "DirectSurface:V", "RLClient:V"
             ))
             val reader = BufferedReader(InputStreamReader(process.inputStream))
             while (running.get()) {
@@ -224,6 +238,7 @@ class DebugLogServer(private val port: Int = DEFAULT_PORT) {
 
     companion object {
         const val DEFAULT_PORT = 8099
+        const val MAX_QUEUED_FRAMES = 500
         private const val TAG = "RLT"
         private const val WS_GUID = "258EAFA5-E914-47DA-95CA-5AB5DC11D65E"
 

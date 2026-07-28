@@ -13,7 +13,7 @@ val winBisonExecutable =
 
 android {
     namespace = "com.runelitetablet"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.runelitetablet"

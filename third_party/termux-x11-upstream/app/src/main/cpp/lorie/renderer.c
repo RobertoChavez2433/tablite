@@ -860,13 +860,11 @@ __noreturn static void* rendererThread(void) {
     bool waitingForBuffers = false;
     while (true) {
         while (rendererShouldWait(&waitingForBuffers)) {
-            bool buffersChanged;
-            uint64_t waitStartNs = rendererNowNs();
-            pthread_cond_wait(&stateCond, &stateLock);
-            uint64_t waitElapsedNs = rendererNowNs() - waitStartNs;
-            pthread_spin_lock(&bufferLock);
-            buffersChanged = !xorg_list_is_empty(&addedBuffers) || !xorg_list_is_empty(&removedBuffers);
-            pthread_spin_unlock(&bufferLock);
+            /*
+             * Attribute the wait from the state that caused us to sleep.
+             * Inspecting after wake races with the signaler and mislabeled
+             * content waits as state/choreographer waits.
+             */
             WaitReason reason = classifyWaitReason(
                 state != NULL,
                 state ? state->surfaceAvailable : false,
@@ -875,7 +873,10 @@ __noreturn static void* rendererThread(void) {
                 state ? state->drawRequested : false,
                 state ? state->cursor.moved : false,
                 state ? state->cursor.updated : false,
-                stateChanged, windowChanged, buffersChanged);
+                stateChanged, windowChanged, false);
+            uint64_t waitStartNs = rendererNowNs();
+            pthread_cond_wait(&stateCond, &stateLock);
+            uint64_t waitElapsedNs = rendererNowNs() - waitStartNs;
             switch (reason) {
                 case WAIT_CHOREOGRAPHER: rendererPerfStats.waitChoreographerNs += waitElapsedNs; break;
                 case WAIT_CONTENT:       rendererPerfStats.waitContentNs += waitElapsedNs; break;

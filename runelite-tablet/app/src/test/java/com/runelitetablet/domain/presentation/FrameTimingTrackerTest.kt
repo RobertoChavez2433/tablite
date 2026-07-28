@@ -48,7 +48,7 @@ class FrameTimingTrackerTest {
     }
 
     @Test
-    fun `jank detection flags frames over 12ms`() {
+    fun `120Hz deadline detection flags a 60fps interval`() {
         val normalInterval = 8_333_333L // 120fps
         val jankInterval = 16_666_666L // 60fps -> jank
         // 10 normal frames
@@ -58,7 +58,7 @@ class FrameTimingTrackerTest {
         // 1 jank frame (16.67ms gap)
         tracker.recordFrame(10 * normalInterval + jankInterval)
 
-        val jankCount = tracker.getJankFrameCount(12.0)
+        val jankCount = tracker.getMissedDeadlineCount()
         assertEquals(1, jankCount)
     }
 
@@ -99,7 +99,7 @@ class FrameTimingTrackerTest {
         for (i in 0 until 50) {
             tracker.recordFrame(i * intervalNs)
         }
-        assertEquals(0, tracker.getJankFrameCount(12.0))
+        assertEquals(0, tracker.getMissedDeadlineCount())
     }
 
     @Test
@@ -122,6 +122,13 @@ class FrameTimingTrackerTest {
     fun `60Hz vblank interval is 16666us`() {
         val intervalUs = 1_000_000.0 / 60.0
         assertEquals(16666.0, intervalUs, 1.0)
+    }
+
+    @Test
+    fun `deadline follows configured target rate`() {
+        assertEquals(8.333, FrameTimingTracker(targetHz = 120).deadlineMs(), 0.01)
+        assertEquals(11.111, FrameTimingTracker(targetHz = 90).deadlineMs(), 0.01)
+        assertEquals(16.666, FrameTimingTracker(targetHz = 60).deadlineMs(), 0.01)
     }
 
     @Test

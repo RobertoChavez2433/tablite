@@ -4,7 +4,17 @@ package com.runelitetablet.domain.presentation
  * Tracks frame intervals as pure math — no Android Surface needed.
  * Records nanosecond timestamps, calculates FPS, jank detection, percentiles.
  */
-class FrameTimingTracker(private val capacity: Int = 240) {
+class FrameTimingTracker(
+    private val capacity: Int = 240,
+    val targetHz: Int = 120,
+    private val deadlineToleranceNs: Long = 100_000L
+) {
+    init {
+        require(capacity >= 2) { "capacity must be at least 2" }
+        require(targetHz > 0) { "targetHz must be positive" }
+        require(deadlineToleranceNs >= 0) { "deadlineToleranceNs must not be negative" }
+    }
+
     private val frameTimes = LongArray(capacity)
     private var index = 0
     private var count = 0
@@ -39,7 +49,22 @@ class FrameTimingTracker(private val capacity: Int = 240) {
         return sorted[idx] / 1_000_000.0 // ns -> ms
     }
 
-    fun getJankFrameCount(thresholdMs: Double = 12.0): Int {
+    fun getMissedDeadlineCount(targetIntervals: Int = 1): Int {
+        require(targetIntervals > 0) { "targetIntervals must be positive" }
+        if (count < 2) return 0
+        val thresholdNs = deadlineNs(targetIntervals) + deadlineToleranceNs
+        return getIntervals().count { it > thresholdNs }
+    }
+
+    fun deadlineNs(targetIntervals: Int = 1): Long {
+        require(targetIntervals > 0) { "targetIntervals must be positive" }
+        return (1_000_000_000.0 * targetIntervals / targetHz).toLong()
+    }
+
+    fun deadlineMs(targetIntervals: Int = 1): Double = deadlineNs(targetIntervals) / 1_000_000.0
+
+    @Deprecated("Use getMissedDeadlineCount so thresholds follow the configured target rate")
+    fun getJankFrameCount(thresholdMs: Double): Int {
         if (count < 2) return 0
         val thresholdNs = (thresholdMs * 1_000_000).toLong()
         return getIntervals().count { it > thresholdNs }

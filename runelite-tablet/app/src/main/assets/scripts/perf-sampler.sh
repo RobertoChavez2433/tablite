@@ -22,6 +22,7 @@ VIRGL_PID="${2:-}"
 INTERVAL_SEC="${3:-1}"
 OUT_FILE="${4:-${HOME}/runelite-native-perf.log}"
 GPU_BUSY_PATH="${5:-}"
+CAPTURE_ID="${RLT_CAPTURE_ID:-unknown}"
 
 if [ -z "$JVM_PID" ]; then
     echo "usage: perf-sampler.sh JVM_PID [VIRGL_PID] [INTERVAL_SEC] [OUT_FILE] [GPU_BUSY_PATH]" >&2
@@ -70,12 +71,12 @@ trap 'EXIT_REQUESTED=1; cleanup_xlorie_tail' TERM INT
 # ===================================================================
 # Snapshot helper — emits one line per thread of $2
 # $1 = label (START|END|TICK), $2 = PID
-# For TICK, caller must also pass ts_ns as $3.
+# For TICK, caller must also pass boottime_ns as $3.
 # ===================================================================
 emit_snapshot() {
     local label="$1"
     local pid="$2"
-    local ts_ns="${3:-}"
+    local boottime_ns="${3:-}"
     [ -d "/proc/$pid" ] || return 0
     for taskdir in /proc/$pid/task/*; do
         [ -d "$taskdir" ] || continue
@@ -94,8 +95,8 @@ emit_snapshot() {
         local sched
         sched=$(cat "$taskdir/schedstat" 2>/dev/null || echo "? ? ?")
         if [ "$label" = "TICK" ]; then
-            printf 'TICK ts_ns=%s pid=%s tid=%s comm=%s state=%s cpus=%s vol=%s nonvol=%s sched=%s\n' \
-                "$ts_ns" "$pid" "$tid" "$comm" "$state" "$cpus" "$vol" "$nonvol" "$sched" >> "$OUT_FILE"
+            printf 'TICK boottime_ns=%s pid=%s tid=%s comm=%s state=%s cpus=%s vol=%s nonvol=%s sched=%s\n' \
+                "$boottime_ns" "$pid" "$tid" "$comm" "$state" "$cpus" "$vol" "$nonvol" "$sched" >> "$OUT_FILE"
         else
             printf '%s pid=%s tid=%s comm=%s state=%s cpus=%s vol=%s nonvol=%s sched=%s\n' \
                 "$label" "$pid" "$tid" "$comm" "$state" "$cpus" "$vol" "$nonvol" "$sched" >> "$OUT_FILE"
@@ -103,14 +104,25 @@ emit_snapshot() {
     done
 }
 
+clock_boottime_ns() {
+    awk '{printf "%.0f\n", $1 * 1000000000.0}' /proc/uptime
+}
+
+clock_realtime_ns() {
+    date +%s%N
+}
+
 # ===================================================================
 # Open output file + header
 # ===================================================================
 printf '=== PERF SAMPLER START pid=%s jvm=%s virgl=%s interval=%ss gpu_busy_path=%s ===\n' \
     "$$" "$JVM_PID" "$VIRGL_PID" "$INTERVAL_SEC" "$GPU_BUSY_PATH" >> "$OUT_FILE"
+printf 'CLOCK_ANCHOR capture_id=%s realtime_ns=%s boottime_ns=%s source=/proc/uptime\n' \
+    "$CAPTURE_ID" "$(clock_realtime_ns)" "$(clock_boottime_ns)" >> "$OUT_FILE"
 
 # START snapshot — one snapshot per monitored PID
-printf '=== START SNAPSHOT ts_ns=%s ===\n' "$(date +%s%N)" >> "$OUT_FILE"
+printf '=== START SNAPSHOT realtime_ns=%s boottime_ns=%s ===\n' \
+    "$(clock_realtime_ns)" "$(clock_boottime_ns)" >> "$OUT_FILE"
 emit_snapshot START "$JVM_PID"
 if [ -n "$VIRGL_PID" ]; then
     emit_snapshot START "$VIRGL_PID"
@@ -138,7 +150,7 @@ while [ "$EXIT_REQUESTED" -eq 0 ]; do
         break
     fi
 
-    local_ts="$(date +%s%N)"
+    local_ts="$(clock_boottime_ns)"
 
     emit_snapshot TICK "$JVM_PID" "$local_ts"
     if [ -n "$VIRGL_PID" ]; then
@@ -148,19 +160,21 @@ while [ "$EXIT_REQUESTED" -eq 0 ]; do
     # GPU busy counter
     if [ -n "$GPU_BUSY_PATH" ] && [ -r "$GPU_BUSY_PATH" ]; then
         local_gpu_val=$(head -1 "$GPU_BUSY_PATH" 2>/dev/null || echo "?")
-        printf 'GPU_BUSY ts_ns=%s path=%s val=%s\n' "$local_ts" "$GPU_BUSY_PATH" "$local_gpu_val" >> "$OUT_FILE"
+        printf 'GPU_BUSY boottime_ns=%s path=%s val=%s\n' "$local_ts" "$GPU_BUSY_PATH" "$local_gpu_val" >> "$OUT_FILE"
     fi
 done
 
 # ===================================================================
 # END snapshot + cleanup
 # ===================================================================
-printf '=== END SNAPSHOT ts_ns=%s ===\n' "$(date +%s%N)" >> "$OUT_FILE"
+printf '=== END SNAPSHOT realtime_ns=%s boottime_ns=%s ===\n' \
+    "$(clock_realtime_ns)" "$(clock_boottime_ns)" >> "$OUT_FILE"
 emit_snapshot END "$JVM_PID"
 if [ -n "$VIRGL_PID" ] && [ -d "/proc/$VIRGL_PID" ]; then
     emit_snapshot END "$VIRGL_PID"
 fi
 
-printf '=== PERF SAMPLER END ts_ns=%s ===\n' "$(date +%s%N)" >> "$OUT_FILE"
+printf '=== PERF SAMPLER END realtime_ns=%s boottime_ns=%s ===\n' \
+    "$(clock_realtime_ns)" "$(clock_boottime_ns)" >> "$OUT_FILE"
 cleanup_xlorie_tail
 rm -f "$SAMPLER_PID_FILE"
