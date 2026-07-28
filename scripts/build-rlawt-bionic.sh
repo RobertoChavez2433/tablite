@@ -56,13 +56,15 @@ if [[ ! -f "${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake" ]]; then
 fi
 
 CLEAN=0
+INSTALL_APP_JAR=0
 EXTRA_CMAKE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --clean) CLEAN=1; shift ;;
         --direct-surface) VARIANT="direct-surface"; shift ;;
-        *) echo "ERROR: unknown arg '$1' (expected --clean and/or --direct-surface)" >&2; exit 1 ;;
+        --install-app-jar) INSTALL_APP_JAR=1; shift ;;
+        *) echo "ERROR: unknown arg '$1' (expected --clean, --direct-surface, or --install-app-jar)" >&2; exit 1 ;;
     esac
 done
 
@@ -111,6 +113,54 @@ if [[ -x "${READELF}" ]]; then
     echo ""
     echo "=== readelf -d ==="
     "${READELF}" -d "${OUTPUT}" | grep -E "(NEEDED|SONAME|VERNEED)" || true
+fi
+
+# The production GLX variant changes only the native payload inside rlawt.
+# Repackage it reproducibly and prove every Java class remains byte-identical
+# before optionally installing both APK source copies.
+if [[ "$VARIANT" == "default" ]]; then
+    if [[ -n "${JAVA_HOME:-}" && -x "${JAVA_HOME}/bin/jar" ]]; then
+        JAR_BIN="${JAVA_HOME}/bin/jar"
+    elif [[ -x "C:/Program Files/Android/Android Studio/jbr/bin/jar.exe" ]]; then
+        JAR_BIN="C:/Program Files/Android/Android Studio/jbr/bin/jar.exe"
+    else
+        echo "ERROR: cannot find jar. Set JAVA_HOME to a JDK 11+ install." >&2
+        exit 1
+    fi
+
+    BASE_JAR="runelite-tablet/app/libs/rlawt-1.8-bionic.jar"
+    OUT_JAR="${BUILD_DIR}/rlawt-1.8-bionic.jar"
+    PACKAGE_DIR="${BUILD_DIR}/jar-native-payload"
+    VERIFY_BASE="${BUILD_DIR}/verify-base"
+    VERIFY_OUT="${BUILD_DIR}/verify-out"
+    rm -rf "${PACKAGE_DIR}" "${VERIFY_BASE}" "${VERIFY_OUT}"
+    mkdir -p "${PACKAGE_DIR}/net/runelite/rlawt/linux-aarch64" "${VERIFY_BASE}" "${VERIFY_OUT}"
+    cp "${OUTPUT}" "${PACKAGE_DIR}/net/runelite/rlawt/linux-aarch64/librlawt.so"
+    cp "${BASE_JAR}" "${OUT_JAR}"
+    "${JAR_BIN}" uf "${OUT_JAR}" \
+        -C "${PACKAGE_DIR}" net/runelite/rlawt/linux-aarch64/librlawt.so
+
+    (cd "${VERIFY_BASE}" && "${JAR_BIN}" xf "${REPO_ROOT}/${BASE_JAR}")
+    (cd "${VERIFY_OUT}" && "${JAR_BIN}" xf "${REPO_ROOT}/${OUT_JAR}")
+    (cd "${VERIFY_BASE}" && find . -type f -name '*.class' -print0 | sort -z | xargs -0 sha256sum) \
+        > "${BUILD_DIR}/base-class-sha256s.txt"
+    (cd "${VERIFY_OUT}" && find . -type f -name '*.class' -print0 | sort -z | xargs -0 sha256sum) \
+        > "${BUILD_DIR}/output-class-sha256s.txt"
+    if ! diff -u "${BUILD_DIR}/base-class-sha256s.txt" "${BUILD_DIR}/output-class-sha256s.txt"; then
+        echo "ERROR: default rlawt repack changed Java class bytes" >&2
+        exit 1
+    fi
+    echo "Repacked production JAR: ${OUT_JAR} ($(wc -c < "${OUT_JAR}") bytes)"
+    echo "Java class integrity: PASS (all class hashes byte-identical)"
+
+    if [[ "$INSTALL_APP_JAR" == "1" ]]; then
+        cp "${OUT_JAR}" "runelite-tablet/app/libs/rlawt-1.8-bionic.jar"
+        cp "${OUT_JAR}" "runelite-tablet/app/src/main/assets/libs/rlawt-1.8-bionic.jar"
+        echo "Installed production JAR into app/libs and app/src/main/assets/libs"
+    fi
+elif [[ "$INSTALL_APP_JAR" == "1" ]]; then
+    echo "ERROR: --install-app-jar is only valid for the production GLX variant" >&2
+    exit 1
 fi
 
 # ===================================================================

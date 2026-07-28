@@ -92,6 +92,6 @@ class VirglTuningTest {
 
         val before = benchmark.parseOutput(beforeOutput)
         val after = benchmark.parseOutput(afterOutput)
-        assertTrue(after.fps > before.fps)
+        assertTrue(after.glxgearsRenderRateHz > before.glxgearsRenderRateHz)
     }
 }

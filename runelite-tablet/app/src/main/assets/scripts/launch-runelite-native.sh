@@ -179,6 +179,7 @@ CPUSET_SETTLE_PID=""
 AFFINITY_TIMELINE_PID=""
 THREAD_CPU_SAMPLER_PID=""
 X11_WINDOW_PROBE_PID=""
+RLAWT_RATE_TAIL_PID=""
 
 # ===================================================================
 # Cleanup
@@ -233,6 +234,7 @@ cleanup_on_exit() {
     [ -n "${X11_WINDOW_PROBE_PID:-}" ] && kill "$X11_WINDOW_PROBE_PID" 2>/dev/null || true
     [ -n "${PERF_SAMPLER_PID:-}" ] && kill "$PERF_SAMPLER_PID" 2>/dev/null || true
     [ -n "${CPUSET_SETTLE_PID:-}" ] && kill "$CPUSET_SETTLE_PID" 2>/dev/null || true
+    [ -n "${RLAWT_RATE_TAIL_PID:-}" ] && kill "$RLAWT_RATE_TAIL_PID" 2>/dev/null || true
     [ -n "${JAVA_PID:-}" ] && kill "$JAVA_PID" 2>/dev/null || true
     [ -n "${OPENBOX_PID:-}" ] && kill "$OPENBOX_PID" 2>/dev/null || true
     [ -n "${VIRGL_PID:-}" ] && kill "$VIRGL_PID" 2>/dev/null || true
@@ -768,6 +770,23 @@ for arg in "${JVM_ARGS[@]}"; do
 done
 echo "  cmd: $JAVA_BIN ${SAFE_JVM_ARGS[*]} -cp <classpath> $MAIN_CLASS $CLIENT_ARGS" | tee -a "$LOGFILE"
 : > "$CLASSLOAD_LOG"
+
+# Forward only the low-rate structured producer summary to the app-owned,
+# loopback-only ingress. Android logcat is UID-scoped and cannot reliably carry
+# Termux records into Tablite. rlawt still writes on the JVM stderr thread;
+# this background bridge performs all cross-process socket I/O.
+if [ -x "$PREFIX/bin/socat" ]; then
+    (
+        tail -F -n 0 "$LOGFILE" 2>/dev/null |
+            grep --line-buffered "RLT_FRAME_RATE_V1" |
+            "$PREFIX/bin/socat" -u - TCP4:127.0.0.1:8100
+    ) &
+    RLAWT_RATE_TAIL_PID=$!
+    echo "FRAME-RATE-BRIDGE: started PID=$RLAWT_RATE_TAIL_PID source=rlawt-summary transport=loopback-tcp destination=127.0.0.1:8100" | tee -a "$LOGFILE"
+else
+    echo "FRAME-RATE-BRIDGE: socat unavailable; structured rates remain in $LOGFILE" | tee -a "$LOGFILE"
+fi
+
 "$JAVA_BIN" "${JVM_ARGS[@]}" -cp "$FULL_CLASSPATH" "$MAIN_CLASS" $CLIENT_ARGS >> "$LOGFILE" 2>&1 &
 JAVA_PID=$!
 echo "$JAVA_PID" > "$HOME/.rlt-native.pid"
@@ -1088,11 +1107,9 @@ summarize_rlawt_swap_gap() {
                 if (n == 0) { print "RLAWT-SUMMARY: no numeric rows in tail"; exit }
                 swap_mean = swap_sum / n
                 gap_mean  = gap_sum  / n
-                cycle = swap_mean + gap_mean
-                fps = (cycle > 0) ? 1000000.0 / cycle : 0
                 ratio = (gap_mean > 0) ? swap_mean / gap_mean : -1
-                printf "RLAWT-SUMMARY: n=%d swap_us mean=%.0f max=%.0f gap_us mean=%.0f max=%.0f ratio=%.2f cycle_us=%.0f fps_estimate=%.2f\n", \
-                    n, swap_mean, swap_max, gap_mean, gap_max, ratio, cycle, fps
+                printf "RLAWT-SUMMARY: n=%d swap_us mean=%.0f max=%.0f gap_us mean=%.0f max=%.0f ratio=%.2f\n", \
+                    n, swap_mean, swap_max, gap_mean, gap_max, ratio
                 print "RLAWT-SUMMARY: classification=unknown confidence=insufficient (swap/gap ratio alone is non-causal)"
             }' | tee -a "$LOGFILE"
 }

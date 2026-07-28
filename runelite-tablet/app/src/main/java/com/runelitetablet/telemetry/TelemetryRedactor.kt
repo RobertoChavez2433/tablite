@@ -12,9 +12,14 @@ object TelemetryRedactor {
         """(?i)(-D(?:JX_(?:SESSION_ID|CHARACTER_ID|DISPLAY_NAME)|[^=\s]*(?:token|secret|password)[^=\s]*)=)([^\s]+)"""
     )
     private val bearer = Regex("""(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+""")
+    private val gameplayOrInputText = Regex(
+        """^.*(?:Chat message type|chatMessage=|typed key|key(?:code|event)=).*$""",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE)
+    )
 
     fun redact(text: String): String = text
         .replace(assignments) { "${it.groupValues[1]}=***" }
         .replace(javaProperties) { "${it.groupValues[1]}***" }
         .replace(bearer, "Bearer ***")
+        .replace(gameplayOrInputText, "[REDACTED gameplay or input text]")
 }

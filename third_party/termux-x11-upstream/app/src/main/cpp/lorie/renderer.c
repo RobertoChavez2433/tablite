@@ -237,7 +237,7 @@ static void rendererLogRedrawPerfSample(uint64_t redrawStartNs, uint64_t lockNs,
     double avgSwapMs = rendererPerfStats.totalSwapNs / 1000000.0 / redrawCount;
     double avgRedrawMs = rendererPerfStats.totalFrameNs / 1000000.0 / redrawCount;
     double avgInterRedrawMs = intervalCount > 0.0 ? (rendererPerfStats.totalInterFrameNs / 1000000.0 / intervalCount) : 0.0;
-    double consumerRedrawFps = avgInterRedrawMs > 0.0 ? (1000.0 / avgInterRedrawMs) : 0.0;
+    double consumerRedrawRateHz = avgInterRedrawMs > 0.0 ? (1000.0 / avgInterRedrawMs) : 0.0;
 
     double redrawWakeUtil = rendererPerfStats.rendererWakeups > 0
         ? (100.0 * rendererPerfStats.consumerRedrawCount / rendererPerfStats.rendererWakeups)
@@ -247,12 +247,12 @@ static void rendererLogRedrawPerfSample(uint64_t redrawStartNs, uint64_t lockNs,
     double waitStateMs = rendererPerfStats.waitStateNs / 1000000.0;
 
     log(
-        "XloriePerf: consumer_redraws=%llu avg_lock_ms=%.3f avg_fence_ms=%.3f avg_swap_ms=%.3f avg_redraw_ms=%.3f avg_inter_redraw_ms=%.3f consumer_redraw_fps=%.1f"
+        "XloriePerf: consumer_redraws=%llu avg_lock_ms=%.3f avg_fence_ms=%.3f avg_swap_ms=%.3f avg_redraw_ms=%.3f avg_inter_redraw_ms=%.3f xlorie_consumer_redraw_rate_hz=%.1f"
         " redraw_wake_util=%.0f%% wakeups_without_redraw=%llu renderer_wakeups=%llu"
         " max_lock_ms=%.3f max_fence_ms=%.3f max_swap_ms=%.3f max_redraw_ms=%.3f max_inter_redraw_ms=%.3f"
         " wait_choreo=%.1fms wait_content=%.1fms wait_state=%.1fms",
         (unsigned long long) rendererPerfStats.consumerRedrawCount,
-        avgLockMs, avgFenceMs, avgSwapMs, avgRedrawMs, avgInterRedrawMs, consumerRedrawFps,
+        avgLockMs, avgFenceMs, avgSwapMs, avgRedrawMs, avgInterRedrawMs, consumerRedrawRateHz,
         redrawWakeUtil,
         (unsigned long long) rendererPerfStats.wakeupsWithoutRedraw,
         (unsigned long long) rendererPerfStats.rendererWakeups,

@@ -47,6 +47,7 @@ KOTLIN_ROOT = Path(
 ACTIVE_METRIC_ROOTS = (
     Path("runelite-tablet/app/src"),
     Path("scripts"),
+    Path("third_party/rlawt"),
     Path("third_party/termux-x11-upstream/app/src/main/cpp/lorie"),
 )
 PRODUCTION_LAUNCH_ROOT = Path("runelite-tablet/app/src/main/assets/scripts")
@@ -58,6 +59,7 @@ INFRASTRUCTURE_CONSTRUCTORS = (
     "DebugLogServer",
     "ExternalXlorieLoader",
     "LocalCaptureController",
+    "NativeTelemetryIngressServer",
     "RuntimeLineProcessLauncher",
     "ScriptManager",
     "TermuxCommandRunner",
@@ -75,6 +77,19 @@ MISLEADING_FRAME_IDENTIFIERS = (
     "renderer_fps",
     "rendererFps",
     "xlorie_estimated_fps",
+)
+ALLOWED_FPS_IDENTIFIERS = frozenset(
+    {
+        "produced_fps",
+        "accepted_fps",
+        "submitted_fps",
+        "presented_fps",
+    }
+)
+FPS_IDENTIFIER_PATTERN = re.compile(r"\b[a-z][a-z0-9_]*_fps\b")
+UNQUALIFIED_FRAME_RATE_ASSIGNMENT_PATTERN = re.compile(
+    r"\b((?:accepted|buffer|choreographer|consumer|damage|display_vsync|frame|glxgears|"
+    r"host_vsync|present|produced|release|renderer|submitted|x11)[a-z0-9_]*_rate)="
 )
 INJECTION_PATTERNS = (
     re.compile(r"(^|\s)-javaagent(?::|=|\s)"),
@@ -290,18 +305,32 @@ def check_metric_semantics(root: Path) -> list[Diagnostic]:
             root, active_root, {".c", ".h", ".java", ".kt", ".ps1", ".py", ".sh"}
         ):
             for line_no, line in enumerate(_read(path).splitlines(), 1):
-                for identifier in MISLEADING_FRAME_IDENTIFIERS:
-                    if identifier in line:
-                        diagnostics.append(
-                            _line_diagnostic(
-                                root,
-                                path,
-                                line_no,
-                                "TBL007",
-                                "honest_frame_metrics",
-                                f"Ambiguous metric '{identifier}' must use a stage-specific name.",
-                            )
+                identifiers = {
+                    identifier
+                    for identifier in MISLEADING_FRAME_IDENTIFIERS
+                    if identifier in line
+                }
+                identifiers.update(
+                    match.group(0)
+                    for match in FPS_IDENTIFIER_PATTERN.finditer(line)
+                    if match.group(0) not in ALLOWED_FPS_IDENTIFIERS
+                )
+                identifiers.update(
+                    match.group(1)
+                    for match in UNQUALIFIED_FRAME_RATE_ASSIGNMENT_PATTERN.finditer(line)
+                )
+                for identifier in sorted(identifiers):
+                    diagnostics.append(
+                        _line_diagnostic(
+                            root,
+                            path,
+                            line_no,
+                            "TBL007",
+                            "honest_frame_metrics",
+                            f"Ambiguous metric '{identifier}': use one of the four lifecycle "
+                            "*_fps stages or a stage-specific *_rate_hz cadence.",
                         )
+                    )
     return diagnostics
 
 
@@ -520,6 +549,22 @@ def _wsl_path(path: Path) -> str:
     return f"/mnt/{drive}{tail}"
 
 
+def _find_native_bash() -> str | None:
+    if os.name != "nt":
+        return shutil.which("bash")
+    candidates = [
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git/bin/bash.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs/Git/bin/bash.exe",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    discovered = shutil.which("bash")
+    if discovered and "system32" not in discovered.lower():
+        return discovered
+    return None
+
+
 def run_shell_syntax(root: Path) -> tuple[bool, str]:
     scripts = [
         path
@@ -527,19 +572,19 @@ def run_shell_syntax(root: Path) -> tuple[bool, str]:
         if search_root.exists()
         for path in search_root.rglob("*.sh")
     ]
-    bash = shutil.which("bash")
+    bash = _find_native_bash()
     wsl = shutil.which("wsl")
     outputs: list[str] = []
     for path in sorted(set(scripts)):
-        if os.name == "nt" and wsl:
+        if bash:
             code, output = _run(
-                [wsl, "bash", "-n", _wsl_path(path)],
+                [bash, "-n", str(path)],
                 root,
                 EXTERNAL_CHECK_BUDGET_MS["shell syntax"] / 1_000.0,
             )
-        elif bash:
+        elif os.name == "nt" and wsl:
             code, output = _run(
-                [bash, "-n", str(path)],
+                [wsl, "bash", "-n", _wsl_path(path)],
                 root,
                 EXTERNAL_CHECK_BUDGET_MS["shell syntax"] / 1_000.0,
             )

@@ -45,7 +45,7 @@ class XServerLogBridgeTest {
         )
         val json = server.buildLogJson(
             level = "D", tag = "XloriePerf",
-            msg = "consumer_redraws=42 consumer_redraw_fps=42.0 wait_choreo=120.5ms",
+            msg = "consumer_redraws=42 xlorie_consumer_redraw_rate_hz=42.0 wait_choreo=120.5ms",
             thread = "28764", source = "native",
             file = "", lineNum = 0, correlationId = null
         )

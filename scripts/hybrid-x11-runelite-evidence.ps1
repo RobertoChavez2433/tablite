@@ -250,19 +250,15 @@ function Get-RuneliteEvidenceSummary {
     $layerHighCategoryVotes = @($Lines | Where-Object { $_ -match $surfaceHighCategoryPattern })
 
     $bufferPattern = [regex]::Escape($visibleSurfacePattern) + ".*queueBuffer: fps=([0-9]+(?:\.[0-9]+)?)"
-    $loriePattern = "LorieNative: ([0-9]+) frames in 5\.0 seconds = ([0-9]+(?:\.[0-9]+)?) FPS"
-    $lorieFpsPattern = "LorieNative: [0-9]+ frames in 5\.0 seconds = ([0-9]+(?:\.[0-9]+)?) FPS"
-    $choreographerPattern = "LorieNative: choreographer callbacks in 5\.0 seconds = ([0-9]+(?:\.[0-9]+)?) FPS"
-    $redrawWakeupPattern = "LorieNative: redraw wakeups in 5\.0 seconds = ([0-9]+(?:\.[0-9]+)?) FPS"
-    $damageRequestPattern = "LorieNative: damage-triggered redraws in 5\.0 seconds = ([0-9]+(?:\.[0-9]+)?) FPS"
-    $presentAfterFlipPattern = "LorieNative: present after-flips in 5\.0 seconds = ([0-9]+(?:\.[0-9]+)?) FPS"
-    $consumerRedrawPattern = "gles-renderer: XloriePerf: .*consumer_redraw_fps=([0-9]+(?:\.[0-9]+)?)"
+    $hostVsyncPattern = "LorieNative: XlorieStageRatesV1: .*host_vsync_callback_rate_hz=([0-9]+(?:\.[0-9]+)?)"
+    $redrawWakeupPattern = "LorieNative: XlorieStageRatesV1: .*renderer_wakeup_rate_hz=([0-9]+(?:\.[0-9]+)?)"
+    $damageRequestPattern = "LorieNative: XlorieStageRatesV1: .*x11_damage_request_rate_hz=([0-9]+(?:\.[0-9]+)?)"
+    $presentAfterFlipPattern = "LorieNative: XlorieStageRatesV1: .*x11_present_after_flip_rate_hz=([0-9]+(?:\.[0-9]+)?)"
+    $consumerRedrawPattern = "gles-renderer: XloriePerf: .*xlorie_consumer_redraw_rate_hz=([0-9]+(?:\.[0-9]+)?)"
 
     $lastBufferMatch = Get-LastRegexCapture -Lines $Lines -Pattern $bufferPattern
     $bufferValues = @(Get-RegexCaptureValues -Lines $Lines -Pattern $bufferPattern)
-    $lastLorieMatch = Get-LastRegexCapture -Lines $Lines -Pattern $loriePattern
-    $lorieFpsValues = @(Get-RegexCaptureValues -Lines $Lines -Pattern $lorieFpsPattern)
-    $choreographerValues = @(Get-RegexCaptureValues -Lines $Lines -Pattern $choreographerPattern)
+    $hostVsyncValues = @(Get-RegexCaptureValues -Lines $Lines -Pattern $hostVsyncPattern)
     $redrawWakeupValues = @(Get-RegexCaptureValues -Lines $Lines -Pattern $redrawWakeupPattern)
     $damageRequestValues = @(Get-RegexCaptureValues -Lines $Lines -Pattern $damageRequestPattern)
     $presentAfterFlipValues = @(Get-RegexCaptureValues -Lines $Lines -Pattern $presentAfterFlipPattern)
@@ -286,29 +282,23 @@ function Get-RuneliteEvidenceSummary {
         LayerHighCategoryVoteCount = $layerHighCategoryVotes.Count
         LastLayerHighCategoryVoteLine = if ($layerHighCategoryVotes.Count -gt 0) { $layerHighCategoryVotes[-1] } else { $null }
         BufferQueueSampleCount = $bufferValues.Count
-        LastBufferQueueFps = if ($lastBufferMatch) { $lastBufferMatch.Groups[1].Value } else { $null }
-        AverageBufferQueueFps = if ($bufferValues.Count -gt 0) { ($bufferValues | Measure-Object -Average).Average } else { $null }
-        MedianBufferQueueFps = Get-MedianValue -Values $bufferValues
-        MaxBufferQueueFps = if ($bufferValues.Count -gt 0) { ($bufferValues | Measure-Object -Maximum).Maximum } else { $null }
-        LorieSampleCount = $lorieFpsValues.Count
-        LastLorieFrames = if ($lastLorieMatch) { $lastLorieMatch.Groups[1].Value } else { $null }
-        LastLorieFps = if ($lastLorieMatch) { $lastLorieMatch.Groups[2].Value } else { $null }
-        AverageLorieFps = if ($lorieFpsValues.Count -gt 0) { ($lorieFpsValues | Measure-Object -Average).Average } else { $null }
-        MedianLorieFps = Get-MedianValue -Values $lorieFpsValues
-        MaxLorieFps = if ($lorieFpsValues.Count -gt 0) { ($lorieFpsValues | Measure-Object -Maximum).Maximum } else { $null }
-        ChoreographerSampleCount = $choreographerValues.Count
-        LastChoreographerFps = if ($choreographerValues.Count -gt 0) { $choreographerValues[-1] } else { $null }
-        AverageChoreographerFps = if ($choreographerValues.Count -gt 0) { ($choreographerValues | Measure-Object -Average).Average } else { $null }
+        LastBufferQueueRateHz = if ($lastBufferMatch) { $lastBufferMatch.Groups[1].Value } else { $null }
+        AverageBufferQueueRateHz = if ($bufferValues.Count -gt 0) { ($bufferValues | Measure-Object -Average).Average } else { $null }
+        MedianBufferQueueRateHz = Get-MedianValue -Values $bufferValues
+        MaxBufferQueueRateHz = if ($bufferValues.Count -gt 0) { ($bufferValues | Measure-Object -Maximum).Maximum } else { $null }
+        HostVsyncSampleCount = $hostVsyncValues.Count
+        LastHostVsyncCallbackRateHz = if ($hostVsyncValues.Count -gt 0) { $hostVsyncValues[-1] } else { $null }
+        AverageHostVsyncCallbackRateHz = if ($hostVsyncValues.Count -gt 0) { ($hostVsyncValues | Measure-Object -Average).Average } else { $null }
         RedrawWakeupSampleCount = $redrawWakeupValues.Count
-        LastRedrawWakeupFps = if ($redrawWakeupValues.Count -gt 0) { $redrawWakeupValues[-1] } else { $null }
-        AverageRedrawWakeupFps = if ($redrawWakeupValues.Count -gt 0) { ($redrawWakeupValues | Measure-Object -Average).Average } else { $null }
+        LastRendererWakeupRateHz = if ($redrawWakeupValues.Count -gt 0) { $redrawWakeupValues[-1] } else { $null }
+        AverageRendererWakeupRateHz = if ($redrawWakeupValues.Count -gt 0) { ($redrawWakeupValues | Measure-Object -Average).Average } else { $null }
         DamageRequestSampleCount = $damageRequestValues.Count
-        LastDamageRequestFps = if ($damageRequestValues.Count -gt 0) { $damageRequestValues[-1] } else { $null }
-        AverageDamageRequestFps = if ($damageRequestValues.Count -gt 0) { ($damageRequestValues | Measure-Object -Average).Average } else { $null }
+        LastDamageRequestRateHz = if ($damageRequestValues.Count -gt 0) { $damageRequestValues[-1] } else { $null }
+        AverageDamageRequestRateHz = if ($damageRequestValues.Count -gt 0) { ($damageRequestValues | Measure-Object -Average).Average } else { $null }
         PresentAfterFlipSampleCount = $presentAfterFlipValues.Count
-        LastPresentAfterFlipFps = if ($presentAfterFlipValues.Count -gt 0) { $presentAfterFlipValues[-1] } else { $null }
-        AveragePresentAfterFlipFps = if ($presentAfterFlipValues.Count -gt 0) { ($presentAfterFlipValues | Measure-Object -Average).Average } else { $null }
-        LastConsumerRedrawFps = if ($lastConsumerRedrawMatch) { $lastConsumerRedrawMatch.Groups[1].Value } else { $null }
+        LastPresentAfterFlipRateHz = if ($presentAfterFlipValues.Count -gt 0) { $presentAfterFlipValues[-1] } else { $null }
+        AveragePresentAfterFlipRateHz = if ($presentAfterFlipValues.Count -gt 0) { ($presentAfterFlipValues | Measure-Object -Average).Average } else { $null }
+        LastConsumerRedrawRateHz = if ($lastConsumerRedrawMatch) { $lastConsumerRedrawMatch.Groups[1].Value } else { $null }
         LastRendererPerfLine = $lastRendererPerfLine
     }
 }
@@ -434,29 +424,23 @@ $summaryLines = @(
     "layer_high_category_vote_count=$($summary.LayerHighCategoryVoteCount)"
     "last_layer_high_category_vote_line=$($summary.LastLayerHighCategoryVoteLine)"
     "bufferqueue_sample_count=$($summary.BufferQueueSampleCount)"
-    "last_bufferqueue_fps=$($summary.LastBufferQueueFps)"
-    "average_bufferqueue_fps=$($summary.AverageBufferQueueFps)"
-    "median_bufferqueue_fps=$($summary.MedianBufferQueueFps)"
-    "max_bufferqueue_fps=$($summary.MaxBufferQueueFps)"
-    "lorie_sample_count=$($summary.LorieSampleCount)"
-    "last_lorie_frames=$($summary.LastLorieFrames)"
-    "last_lorie_fps=$($summary.LastLorieFps)"
-    "average_lorie_fps=$($summary.AverageLorieFps)"
-    "median_lorie_fps=$($summary.MedianLorieFps)"
-    "max_lorie_fps=$($summary.MaxLorieFps)"
-    "choreographer_sample_count=$($summary.ChoreographerSampleCount)"
-    "last_choreographer_fps=$($summary.LastChoreographerFps)"
-    "average_choreographer_fps=$($summary.AverageChoreographerFps)"
+    "last_bufferqueue_rate_hz=$($summary.LastBufferQueueRateHz)"
+    "average_bufferqueue_rate_hz=$($summary.AverageBufferQueueRateHz)"
+    "median_bufferqueue_rate_hz=$($summary.MedianBufferQueueRateHz)"
+    "max_bufferqueue_rate_hz=$($summary.MaxBufferQueueRateHz)"
+    "host_vsync_sample_count=$($summary.HostVsyncSampleCount)"
+    "last_host_vsync_callback_rate_hz=$($summary.LastHostVsyncCallbackRateHz)"
+    "average_host_vsync_callback_rate_hz=$($summary.AverageHostVsyncCallbackRateHz)"
     "redraw_wakeup_sample_count=$($summary.RedrawWakeupSampleCount)"
-    "last_redraw_wakeup_fps=$($summary.LastRedrawWakeupFps)"
-    "average_redraw_wakeup_fps=$($summary.AverageRedrawWakeupFps)"
+    "last_renderer_wakeup_rate_hz=$($summary.LastRendererWakeupRateHz)"
+    "average_renderer_wakeup_rate_hz=$($summary.AverageRendererWakeupRateHz)"
     "damage_request_sample_count=$($summary.DamageRequestSampleCount)"
-    "last_damage_request_fps=$($summary.LastDamageRequestFps)"
-    "average_damage_request_fps=$($summary.AverageDamageRequestFps)"
+    "last_damage_request_rate_hz=$($summary.LastDamageRequestRateHz)"
+    "average_damage_request_rate_hz=$($summary.AverageDamageRequestRateHz)"
     "present_after_flip_sample_count=$($summary.PresentAfterFlipSampleCount)"
-    "last_present_after_flip_fps=$($summary.LastPresentAfterFlipFps)"
-    "average_present_after_flip_fps=$($summary.AveragePresentAfterFlipFps)"
-    "last_xlorie_consumer_redraw_fps=$($summary.LastConsumerRedrawFps)"
+    "last_present_after_flip_rate_hz=$($summary.LastPresentAfterFlipRateHz)"
+    "average_present_after_flip_rate_hz=$($summary.AveragePresentAfterFlipRateHz)"
+    "last_xlorie_consumer_redraw_rate_hz=$($summary.LastConsumerRedrawRateHz)"
     "last_renderer_perf_line=$($summary.LastRendererPerfLine)"
     "log_path=$logPath"
 )

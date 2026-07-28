@@ -566,7 +566,7 @@ private class SurfaceControlBufferProbeView(
         if (elapsed < REPORT_INTERVAL_NS) return
         val submittedFps = (submittedCount - reportSubmitted) * 1_000_000_000.0 / elapsed
         val presentedFps = (presentedCount - reportPresented) * 1_000_000_000.0 / elapsed
-        val releasedFps = (releasedCount - reportReleased) * 1_000_000_000.0 / elapsed
+        val releaseCallbackRateHz = (releasedCount - reportReleased) * 1_000_000_000.0 / elapsed
         val inFlight = slots.count { it.inFlight }
         val fdNow = countOpenFds()
         AppLog.perf(
@@ -574,7 +574,7 @@ private class SurfaceControlBufferProbeView(
                 "latched=$latchedCount presented=$presentedCount released=$releasedCount starved=$starvedCount " +
                 "submitted_fps=${String.format(Locale.US, "%.1f", submittedFps)} " +
                 "presented_fps=${String.format(Locale.US, "%.1f", presentedFps)} " +
-                "released_fps=${String.format(Locale.US, "%.1f", releasedFps)} " +
+                "release_callback_rate_hz=${String.format(Locale.US, "%.1f", releaseCallbackRateHz)} " +
                 "inFlight=$inFlight maxInFlight=$maxInFlight acquireFenceSubmits=$acquireFenceSubmitCount " +
                 "fenceTimeouts=$timedOutFenceCount fdBaseline=$fdBaseline fdNow=$fdNow"
         )

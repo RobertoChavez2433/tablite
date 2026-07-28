@@ -247,8 +247,10 @@ class LaunchCoordinator(
             val (gameW, gameH) = computeGameSize(uiScale)
             logger?.state("launchInternal: computed UI scale=$uiScale gameSize=${gameW}x${gameH} from displayMetrics ${context.resources.displayMetrics.widthPixels}x${context.resources.displayMetrics.heightPixels}", correlationId = correlationId)
             // S81 probes-OFF A/B: drop RLAWT_PERF_FINISH / _XSYNC / _GPU_TIMER. Keep
-            // RLAWT_PERF=1 so rlawt still emits the per-window swap_us + gap_us + glerr
-            // summary (negligible overhead, just two clock_gettime per swap) and keep
+            // RLAWT_PERF=1 so rlawt emits swap/gap statistics plus a structured,
+            // sequence-derived produced_fps window. A 30-frame window keeps SUMMARY
+            // useful even when the producer is running near 10 FPS.
+            // Keep
             // RLT_PERF_SAMPLE=1 so the /proc per-thread sampler runs.
             // RLAWT_PERF_CSV: S81 audit — opens $HOME/rlawt-perframe.csv for raw
             // per-frame row dump. Two clock_gettimes + one fprintf per swap, line-
@@ -265,7 +267,7 @@ class LaunchCoordinator(
                 "RLT_CAPTURE_ID=${capture.runId} RLT_TELEMETRY_MODE=${capture.telemetryMode} " +
                 "RLT_RENDERER_BACKEND=${capture.backend} RLT_TARGET_HZ=${capture.targetHz} " +
                 "RLT_CAPTURE_DIR=\$HOME/.rlt/captures/${capture.runId} " +
-                "RLT_PERF_SAMPLE=$perfSampler RLAWT_PERF=$rlawtPerf $rawFrameCsv" +
+                "RLT_PERF_SAMPLE=$perfSampler RLAWT_PERF=$rlawtPerf RLAWT_PERF_WINDOW=30 $rawFrameCsv" +
                 "exec \"$scriptPath\"$envFileArg"
             logger?.state(
                 "launchInternal: dispatching native-path command scriptPath=$scriptPath hasEnvFile=${envFilePath != null} " +

@@ -34,7 +34,7 @@ class DebugLogServer(
     private val droppedFrames = AtomicLong(0)
     private val startTimeMs = System.currentTimeMillis()
 
-    /** Callback for native log lines (XloriePerf, etc). Set by PerfDashboard to receive renderer stats. */
+    /** Callback for bounded native telemetry summaries. Raw per-frame events never traverse logcat. */
     @Volatile var nativeLogListener: ((String) -> Unit)? = null
 
     fun start() {
@@ -194,7 +194,7 @@ class DebugLogServer(
             val process = lineProcessLauncher.launch(listOf(
                 "logcat", "-v", "threadtime", "-s",
                 "LorieNative:V", "gles-renderer:V", "XlorieCaps:V", "Xlorie:V",
-                "RlawtSurface:V", "DirectSurface:V", "RLClient:V"
+                "RlawtSurface:V", "DirectSurface:V", "RLClient:V", "RLFrame:V"
             ))
             process.use {
                 while (running.get()) {
@@ -211,7 +211,9 @@ class DebugLogServer(
                         source = source, file = "", lineNum = 0, correlationId = null
                     )
                     broadcast(json)
-                    if (msg.contains("XloriePerf:")) nativeLogListener?.invoke(msg)
+                    if (msg.contains("XloriePerf:") || msg.contains("RLT_FRAME_RATE_V1")) {
+                        nativeLogListener?.invoke(msg)
+                    }
                 }
             }
         } catch (e: Exception) {

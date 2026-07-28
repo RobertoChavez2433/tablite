@@ -135,6 +135,19 @@ $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $captureDir = Join-Path $OutputRoot "$timestamp-$runId"
 New-Item -ItemType Directory -Path $captureDir -Force | Out-Null
 
+$nativeLogRemotePath = "/data/data/com.termux/files/home/runelite-native.log"
+$nativeLogSizeResult = Invoke-Adb @(
+    "shell", "run-as", "com.termux", "stat", "-c", "%s", $nativeLogRemotePath
+) -AllowFailure
+$nativeLogStartBytes = if (
+    $nativeLogSizeResult.ExitCode -eq 0 -and
+    $nativeLogSizeResult.Output.Trim() -match "^[0-9]+$"
+) {
+    [long]$nativeLogSizeResult.Output.Trim()
+} else {
+    $null
+}
+
 $deviceTrace = "/data/misc/perfetto-traces/rlt-$runId.perfetto-trace"
 $sourceConfig = Join-Path $PSScriptRoot "perfetto/frame-pipeline.pbtxt"
 $resolvedConfig = Join-Path $captureDir "perfetto-config.pbtxt"
@@ -188,6 +201,18 @@ try {
     }
 }
 
+$nativeLogEndSizeResult = Invoke-Adb @(
+    "shell", "run-as", "com.termux", "stat", "-c", "%s", $nativeLogRemotePath
+) -AllowFailure
+$nativeLogEndBytes = if (
+    $nativeLogEndSizeResult.ExitCode -eq 0 -and
+    $nativeLogEndSizeResult.Output.Trim() -match "^[0-9]+$"
+) {
+    [long]$nativeLogEndSizeResult.Output.Trim()
+} else {
+    $null
+}
+
 Invoke-Adb @("pull", $deviceTrace, (Join-Path $captureDir "system.perfetto-trace")) | Out-Null
 Invoke-Adb @("shell", "rm", "-f", $deviceTrace) -AllowFailure | Out-Null
 
@@ -226,10 +251,25 @@ foreach ($remoteLog in @("files/home/runelite-native.log", "files/home/runelite-
     $name = Split-Path -Leaf $remoteLog
     [void](Export-AdbBinary @("exec-out", "run-as", "com.termux", "cat", $remoteLog) (Join-Path $captureDir $name) -AllowFailure)
 }
+if (
+    $null -ne $nativeLogStartBytes -and
+    $null -ne $nativeLogEndBytes -and
+    $nativeLogEndBytes -ge $nativeLogStartBytes
+) {
+    $captureWindowBytes = $nativeLogEndBytes - $nativeLogStartBytes
+    [void](Export-AdbBinary @(
+        "exec-out", "run-as", "com.termux",
+        "/data/data/com.termux/files/usr/bin/dd",
+        "if=$nativeLogRemotePath", "bs=1",
+        "skip=$nativeLogStartBytes", "count=$captureWindowBytes", "status=none"
+    ) (Join-Path $captureDir "runelite-native-capture-window.log") -AllowFailure)
+}
 
 $sensitivePattern = "(?i)(JX_(?:SESSION_ID|CHARACTER_ID|DISPLAY_NAME)|access_token|refresh_token)\s*[=:]\s*([^\s,`"']+)"
 $javaPropertyPattern = "(?i)(-D(?:JX_(?:SESSION_ID|CHARACTER_ID|DISPLAY_NAME)|[^=\s]*(?:token|secret|password)[^=\s]*)=)([^\s]+)"
 $bearerPattern = "(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"
+$gameplayTextPattern = "(?im)^.*(?:Chat message type|chatMessage=|typed key|key(?:code|event)=).*$"
+$legacyAmbiguousRatePattern = "(?im)^.*(?:choreographer callbacks|redraw wakeups|damage-triggered redraws|present flip attempts|present after-flips|[0-9]+ frames) in 5\.0 seconds\s*=.*FPS.*$"
 Get-ChildItem -LiteralPath $captureDir -Recurse -File |
     Where-Object { $_.Extension -in @(".txt", ".log", ".csv", ".json", ".md") } |
     ForEach-Object {
@@ -238,6 +278,12 @@ Get-ChildItem -LiteralPath $captureDir -Recurse -File |
             $text = [regex]::Replace($text, $sensitivePattern, '$1=***')
             $text = [regex]::Replace($text, $javaPropertyPattern, '$1***')
             $text = [regex]::Replace($text, $bearerPattern, 'Bearer ***')
+            $text = [regex]::Replace($text, $gameplayTextPattern, '[REDACTED private gameplay content]')
+            $text = [regex]::Replace(
+                $text,
+                $legacyAmbiguousRatePattern,
+                '[IGNORED legacy ambiguous cadence; no FPS attribution]'
+            )
             $text | Set-Content -LiteralPath $_.FullName -Encoding utf8
         }
     }
@@ -253,6 +299,8 @@ $manifest = [ordered]@{
     capture_started_utc = $captureStartedUtc
     capture_completed_utc = (Get-Date).ToUniversalTime().ToString("o")
     duration_seconds = $DurationSeconds
+    native_log_start_bytes = $nativeLogStartBytes
+    native_log_end_bytes = $nativeLogEndBytes
     target_hz = $TargetHz
     app_target_hz = $appTargetHz
     renderer_backend = $rendererBackend

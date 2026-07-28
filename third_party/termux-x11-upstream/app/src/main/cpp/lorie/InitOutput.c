@@ -526,21 +526,24 @@ static CARD32 lorieFramecounter(unused OsTimerPtr timer, unused CARD32 time, unu
     clock_gettime(CLOCK_MONOTONIC, &heartbeatTs);
     uint64_t heartbeatNs = (uint64_t) heartbeatTs.tv_sec * 1000000000ULL +
         (uint64_t) heartbeatTs.tv_nsec;
-    log(INFO, "RendererHeartbeat: monotonic_ns=%llu rendered=%u choreographer_callbacks=%u",
+    log(INFO, "RendererHeartbeat: monotonic_ns=%llu consumer_redraws=%u host_vsync_callbacks=%u",
         (unsigned long long) heartbeatNs, pvfb->state->renderedFrames, choreographerCallbacks);
-    log(INFO, "choreographer callbacks in 5.0 seconds = %.1f FPS", ((float) choreographerCallbacks) / 5.0f);
-    log(INFO, "redraw wakeups in 5.0 seconds = %.1f FPS", ((float) redrawWakeups) / 5.0f);
-    log(INFO, "damage-triggered redraws in 5.0 seconds = %.1f FPS", ((float) damageRequests) / 5.0f);
-    log(INFO, "AhbLockTrace: sticky=%d lock_calls=%u unlock_calls=%u sticky_hits=%u flush_skipped=%u in 5.0s",
-        lorieStickyAhbLock(), ahbLockCalls, ahbUnlockCalls, ahbStickyHits, ahbFlushSkipped);
-    log(INFO, "present flip attempts in 5.0 seconds = %.1f FPS (accepted %.1f, rejected %.1f)",
+    log(INFO,
+        "XlorieStageRatesV1: window_ms=5000 host_vsync_callback_rate_hz=%.1f "
+        "renderer_wakeup_rate_hz=%.1f x11_damage_request_rate_hz=%.1f "
+        "x11_present_attempt_rate_hz=%.1f x11_present_accepted_rate_hz=%.1f "
+        "x11_present_rejected_rate_hz=%.1f x11_present_after_flip_rate_hz=%.1f "
+        "consumer_redraw_count=%u",
+        ((float) choreographerCallbacks) / 5.0f,
+        ((float) redrawWakeups) / 5.0f,
+        ((float) damageRequests) / 5.0f,
         ((float) presentFlipAttempts) / 5.0f,
         ((float) presentFlipAccepted) / 5.0f,
-        ((float) presentFlipRejected) / 5.0f);
-    log(INFO, "present after-flips in 5.0 seconds = %.1f FPS", ((float) presentAfterFlips) / 5.0f);
-    if (pvfb->state->renderedFrames)
-        log(INFO, "%d frames in 5.0 seconds = %.1f FPS",
-            pvfb->state->renderedFrames, ((float) pvfb->state->renderedFrames) / 5);
+        ((float) presentFlipRejected) / 5.0f,
+        ((float) presentAfterFlips) / 5.0f,
+        pvfb->state->renderedFrames);
+    log(INFO, "AhbLockTrace: sticky=%d lock_calls=%u unlock_calls=%u sticky_hits=%u flush_skipped=%u in 5.0s",
+        lorieStickyAhbLock(), ahbLockCalls, ahbUnlockCalls, ahbStickyHits, ahbFlushSkipped);
     pvfb->state->renderedFrames = 0;
     return 5000;
 }

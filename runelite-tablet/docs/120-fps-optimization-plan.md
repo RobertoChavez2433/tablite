@@ -97,6 +97,22 @@ Current evidence shows the panel is not the initial ceiling:
 
 ## Phase 1 — Build the Frame Flight Recorder
 
+Implementation checkpoint (2026-07-28):
+
+- rlawt SUMMARY mode now emits `RLT_FRAME_RATE_V1` from exact, monotonic
+  post-swap sequence intervals. The app and host analyzer independently
+  recompute the rate and reject inconsistent, duplicate, reordered,
+  overlapping, stale, or cross-run windows.
+- The app dashboard reports `produced_fps` only from that producer sequence.
+  It reports accepted, submitted, and presented FPS as unavailable until
+  their events are correlated to the same sequence.
+- Xlorie redraws, Choreographer callbacks, X11 damage/Present activity,
+  BufferQueue activity, release callbacks, and synthetic glxgears output are
+  explicitly named stage rates in hertz. They cannot be promoted to FPS by
+  the canonical analyzer.
+- Presentation correlation for the native X11 path remains incomplete. No
+  current number is accepted as uniquely presented FPS.
+
 ### Shared identity and clock contract
 
 - Generate a random `run_id` in the Android app and pass it to the launcher, rlawt, Mesa/VirGL telemetry, Xlorie, and host collector.
@@ -120,6 +136,24 @@ Every `FrameEventV1` contains:
 - Monotonic begin/end and thread CPU time.
 - Dimensions, stride, damaged pixels, bytes transferred, commands, queue depth, and configuration hash where relevant.
 - Status such as presented, duplicate, superseded, dropped, starved, timed out, unsupported, or telemetry lost.
+
+Every instrumented API handoff must emit or aggregate:
+
+- The incoming and outgoing `frame_seq`, plus any API-native frame, fence,
+  buffer, resource, connection, window, or transaction identifier.
+- Monotonic begin/end time and calling-thread CPU time.
+- Input/output bytes, commands, damage pixels, dimensions, format, and
+  configuration hash when the handoff can transform data.
+- Queue depth and oldest-item age before and after the call.
+- Wait reason and wait duration, including socket, fence, lock, condition,
+  dequeue, acknowledgment, compositor, and buffer-release waits.
+- Outcome and ownership transfer: accepted, submitted, completed, dropped,
+  duplicated, superseded, timed out, unsupported, or telemetry lost.
+
+Instrumentation escalates locally. SUMMARY first identifies the largest
+serialized stage. BURST then records that stage's API handoffs. Only the
+specific slow handoff is expanded with DEEP counters or traces. A downstream
+rate may never be substituted for a missing upstream or presentation event.
 
 Define rates separately:
 

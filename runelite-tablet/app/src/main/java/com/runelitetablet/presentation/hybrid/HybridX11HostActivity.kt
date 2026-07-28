@@ -100,14 +100,14 @@ class HybridX11HostActivity : ComponentActivity() {
             // Log frame stats every 120 frames (~1 second at 120fps)
             if (hostVsyncCallbackCount - lastHostVsyncLogCount >= 120) {
                 lastHostVsyncLogCount = hostVsyncCallbackCount
-                val fps = frameTracker.getAverageFps()
+                val callbackRateHz = frameTracker.getAverageRateHz()
                 val missedDeadlines = frameTracker.getMissedDeadlineCount()
                 val p99 = frameTracker.getFrameTimePercentile(99.0)
                 val heapMb = (Runtime.getRuntime().let { it.totalMemory() - it.freeMemory() } / 1_048_576L).toInt()
-                AppLog.hostVsync(fps, missedDeadlines, p99, targetHz, "periodic heap=${heapMb}MB", sessionId)
+                AppLog.hostVsync(callbackRateHz, missedDeadlines, p99, targetHz, "periodic heap=${heapMb}MB", sessionId)
                 val freeMemMb = (Runtime.getRuntime().freeMemory() / (1024 * 1024)).toInt()
                 if (heapMb > 128 && missedDeadlines > 2) {
-                    AppLog.perf("MEMORY_PRESSURE: heap=${heapMb}MB free=${freeMemMb}MB host_vsync_misses=$missedDeadlines callbackRate=$fps")
+                    AppLog.perf("MEMORY_PRESSURE: heap=${heapMb}MB free=${freeMemMb}MB host_vsync_misses=$missedDeadlines host_vsync_callback_rate_hz=$callbackRateHz")
                 }
             }
             // Per-callback misses stay in the binary recorder. Logcat receives
@@ -202,19 +202,9 @@ class HybridX11HostActivity : ComponentActivity() {
         observeBridgeState()
         val container = (application as com.runelitetablet.RuneLiteTabletApp).container
         perfDashboard = container.perf.dashboard
+        perfDashboard?.resetFrameMetrics()
         cpuBooster = container.perf.cpuBooster
         commandRunner = container.termux.commandRunner
-        // Wire native XloriePerf stats into the perf dashboard
-        container.debugLogServer?.nativeLogListener = { msg ->
-            PerfDashboard.parseXloriePerfLine(msg)?.let { stats ->
-                perfDashboard?.updateConsumerStats(
-                    stats.consumerRedrawFps,
-                    stats.choreoPct,
-                    stats.contentPct,
-                    stats.statePct
-                )
-            }
-        }
         AppLog.lifecycle("HybridX11HostActivity.onCreate")
         // WINDOW-geometry preflight: capture what Android hands us BEFORE any surface change.
         // Lets us tell whether immersive bars took effect, what the starting window-insets

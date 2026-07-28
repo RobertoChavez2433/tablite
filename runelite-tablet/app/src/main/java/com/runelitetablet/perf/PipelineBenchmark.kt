@@ -25,7 +25,7 @@ class PipelineBenchmark(private val logger: Logger) {
     }
 
     data class BenchmarkResult(
-        val fps: Double,
+        val glxgearsRenderRateHz: Double,
         val glRenderer: String,
         val glVersion: String,
         val error: String? = null
@@ -35,7 +35,7 @@ class PipelineBenchmark(private val logger: Logger) {
         var glRenderer = ""
         var glVersion = ""
         var error: String? = null
-        val fpsValues = mutableListOf<Double>()
+        val renderRateValues = mutableListOf<Double>()
 
         for (line in lines) {
             when {
@@ -46,15 +46,15 @@ class PipelineBenchmark(private val logger: Logger) {
                 line.startsWith("BENCHMARK: error=") ->
                     error = line.substringAfter("error=")
                 line.contains("frames in") ->
-                    parseFpsFromGlxgears(line)?.let { fpsValues.add(it) }
+                    parseRenderRateFromGlxgears(line)?.let { renderRateValues.add(it) }
             }
         }
 
-        val avgFps = if (fpsValues.isNotEmpty()) fpsValues.average() else 0.0
+        val averageRenderRateHz = if (renderRateValues.isNotEmpty()) renderRateValues.average() else 0.0
 
-        val result = BenchmarkResult(avgFps, glRenderer, glVersion, error)
-        logger.perf("BENCHMARK: fps=%.1f renderer=%s version=%s error=%s".format(
-            result.fps, result.glRenderer, result.glVersion, result.error ?: "none"
+        val result = BenchmarkResult(averageRenderRateHz, glRenderer, glVersion, error)
+        logger.perf("BENCHMARK: glxgears_render_rate_hz=%.1f renderer=%s version=%s error=%s".format(
+            result.glxgearsRenderRateHz, result.glRenderer, result.glVersion, result.error ?: "none"
         ))
         return result
     }
@@ -63,7 +63,7 @@ class PipelineBenchmark(private val logger: Logger) {
         /**
          * Parses "300 frames in 5.0 seconds = 60.0 FPS" format.
          */
-        fun parseFpsFromGlxgears(line: String): Double? {
+        fun parseRenderRateFromGlxgears(line: String): Double? {
             val match = Regex("""(\d+) frames in [\d.]+ seconds = ([\d.]+) FPS""").find(line)
             return match?.groupValues?.get(2)?.toDoubleOrNull()
         }

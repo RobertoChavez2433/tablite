@@ -87,7 +87,25 @@ class ArchitectureAnalyzerTest(unittest.TestCase):
         diagnostics = self._analyze(
             {
                 "scripts/analyze-frame-capture.ps1":
-                    "$summary.renderer_fps = 42\n"
+                    "$summary.xlorie_consumer_fps = 42\n"
+            }
+        )
+        self.assertEqual(["TBL007"], [item.code for item in diagnostics])
+
+    def test_canonical_pipeline_fps_stages_are_allowed(self) -> None:
+        diagnostics = self._analyze(
+            {
+                "scripts/analyze-frame-capture.ps1":
+                    "produced_fps accepted_fps submitted_fps presented_fps\n"
+            }
+        )
+        self.assertEqual([], diagnostics)
+
+    def test_cadence_rate_without_unit_is_rejected(self) -> None:
+        diagnostics = self._analyze(
+            {
+                "runelite-tablet/app/src/main/java/com/runelitetablet/Bad.kt":
+                    'logger.log("host_vsync_callback_rate=120")\n'
             }
         )
         self.assertEqual(["TBL007"], [item.code for item in diagnostics])

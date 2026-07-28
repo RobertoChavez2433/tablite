@@ -2,7 +2,8 @@ package com.runelitetablet.domain.presentation
 
 /**
  * Tracks frame intervals as pure math — no Android Surface needed.
- * Records nanosecond timestamps, calculates FPS, jank detection, percentiles.
+ * Records nanosecond timestamps and calculates a generic event rate, deadline
+ * misses, and percentiles. Callers must name the event stage themselves.
  */
 class FrameTimingTracker(
     private val capacity: Int = 240,
@@ -25,7 +26,7 @@ class FrameTimingTracker(
         if (count < capacity) count++
     }
 
-    fun getAverageFps(windowSize: Int = 120): Double {
+    fun getAverageRateHz(windowSize: Int = 120): Double {
         val window = minOf(windowSize, count)
         if (window < 2) return 0.0
 

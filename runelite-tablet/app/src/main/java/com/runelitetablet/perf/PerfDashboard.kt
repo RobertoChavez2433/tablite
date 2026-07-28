@@ -15,19 +15,24 @@ class PerfDashboard(
     private val logger: Logger,
     private val affinityMonitor: CpuAffinityMonitor,
     private val ptraceEstimator: PtraceOverheadEstimator,
-    private val intervalSeconds: Long = 10
+    private val intervalSeconds: Long = 10,
+    private val producerRateTracker: ProducerRateTracker = ProducerRateTracker(),
+    private val monotonicNowNs: () -> Long = System::nanoTime
 ) {
 
     data class Summary(
         val affinities: List<CpuAffinityMonitor.ProcessAffinity>,
         val overheads: List<PtraceOverheadEstimator.OverheadSample>,
-        val consumerRedrawFps: Double,
+        val producedFps: Double?,
+        val producedFpsStatus: String,
+        val producerLastSeq: Long?,
+        val xlorieConsumerRedrawRateHz: Double?,
         val waitChoreoPct: Double,
         val waitContentPct: Double,
         val waitStatePct: Double
     )
 
-    @Volatile private var lastConsumerRedrawFps: Double = 0.0
+    @Volatile private var lastConsumerRedrawRateHz: Double? = null
     @Volatile private var lastWaitChoreoPct: Double = 0.0
     @Volatile private var lastWaitContentPct: Double = 0.0
     @Volatile private var lastWaitStatePct: Double = 0.0
@@ -39,11 +44,22 @@ class PerfDashboard(
     }
     private var scheduledTask: ScheduledFuture<*>? = null
 
-    fun updateConsumerStats(consumerRedrawFps: Double, choreoPct: Double, contentPct: Double, statePct: Double) {
-        lastConsumerRedrawFps = consumerRedrawFps
+    fun updateConsumerStats(consumerRedrawRateHz: Double, choreoPct: Double, contentPct: Double, statePct: Double) {
+        lastConsumerRedrawRateHz = consumerRedrawRateHz
         lastWaitChoreoPct = choreoPct
         lastWaitContentPct = contentPct
         lastWaitStatePct = statePct
+    }
+
+    fun updateProducerStats(sample: ProducerRateTracker.Sample): ProducerRateTracker.UpdateOutcome =
+        producerRateTracker.update(sample)
+
+    fun resetFrameMetrics() {
+        producerRateTracker.reset()
+        lastConsumerRedrawRateHz = null
+        lastWaitChoreoPct = 0.0
+        lastWaitContentPct = 0.0
+        lastWaitStatePct = 0.0
     }
 
     fun updatePids(pids: List<Int>) {
@@ -69,9 +85,15 @@ class PerfDashboard(
     fun collect(pids: List<Int>): Summary {
         val affinities = affinityMonitor.sample(pids)
         val overheads = ptraceEstimator.sample(pids)
+        val producer = producerRateTracker.snapshot(monotonicNowNs())
 
         val summary = Summary(
-            affinities, overheads, lastConsumerRedrawFps,
+            affinities,
+            overheads,
+            producer.producedFps,
+            producer.status,
+            producer.lastSeq,
+            lastConsumerRedrawRateHz,
             lastWaitChoreoPct, lastWaitContentPct, lastWaitStatePct
         )
 
@@ -89,9 +111,19 @@ class PerfDashboard(
             val prefix = fixedPrefix(o.name)
             "${prefix}kernel_ratio=%.2f".format(Locale.ROOT, o.kernelRatio)
         }
+        val producedValue = summary.producedFps?.let { "%.3f".format(Locale.ROOT, it) } ?: "unavailable"
+        val producerLastSeq = summary.producerLastSeq?.toString() ?: "unavailable"
+        val consumerRate = summary.xlorieConsumerRedrawRateHz
+            ?.let { "%.1f".format(Locale.ROOT, it) }
+            ?: "unavailable"
         logger.perf(
             "PERF_SUMMARY: $affinityParts $overheadParts" +
-                " consumer_redraw_fps=%.1f".format(Locale.ROOT, summary.consumerRedrawFps) +
+                " produced_fps=$producedValue" +
+                " produced_fps_status=${summary.producedFpsStatus}" +
+                " producer_last_seq=$producerLastSeq" +
+                " accepted_fps=unavailable submitted_fps=unavailable presented_fps=unavailable" +
+                " presentation_status=unavailable_no_correlated_presentation_events" +
+                " xlorie_consumer_redraw_rate_hz=$consumerRate" +
                 " wait_choreo_pct=%.0f".format(Locale.ROOT, summary.waitChoreoPct) +
                 " wait_content_pct=%.0f".format(Locale.ROOT, summary.waitContentPct) +
                 " wait_state_pct=%.0f".format(Locale.ROOT, summary.waitStatePct)
@@ -100,15 +132,16 @@ class PerfDashboard(
 
     companion object {
         fun parseXloriePerfLine(line: String): ConsumerStats? {
-            val consumerRedrawFps = extractField(line, "consumer_redraw_fps")?.toDoubleOrNull() ?: return null
+            val consumerRedrawRateHz =
+                extractField(line, "xlorie_consumer_redraw_rate_hz")?.toDoubleOrNull() ?: return null
             val choreoMs = extractField(line, "wait_choreo")?.removeSuffix("ms")?.toDoubleOrNull() ?: 0.0
             val contentMs = extractField(line, "wait_content")?.removeSuffix("ms")?.toDoubleOrNull() ?: 0.0
             val stateMs = extractField(line, "wait_state")?.removeSuffix("ms")?.toDoubleOrNull() ?: 0.0
             val totalWaitMs = choreoMs + contentMs + stateMs
             return if (totalWaitMs > 0) {
-                ConsumerStats(consumerRedrawFps, 100.0 * choreoMs / totalWaitMs, 100.0 * contentMs / totalWaitMs, 100.0 * stateMs / totalWaitMs)
+                ConsumerStats(consumerRedrawRateHz, 100.0 * choreoMs / totalWaitMs, 100.0 * contentMs / totalWaitMs, 100.0 * stateMs / totalWaitMs)
             } else {
-                ConsumerStats(consumerRedrawFps, 0.0, 0.0, 0.0)
+                ConsumerStats(consumerRedrawRateHz, 0.0, 0.0, 0.0)
             }
         }
 
@@ -131,7 +164,7 @@ class PerfDashboard(
     }
 
     data class ConsumerStats(
-        val consumerRedrawFps: Double,
+        val consumerRedrawRateHz: Double,
         val choreoPct: Double,
         val contentPct: Double,
         val statePct: Double

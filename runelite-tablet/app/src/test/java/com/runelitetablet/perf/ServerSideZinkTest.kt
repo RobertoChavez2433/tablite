@@ -20,8 +20,8 @@ class ServerSideZinkTest {
             "ZINK_EVAL: zink virgl server started PID=12345",
             "300 frames in 5.0 seconds = 60.0 FPS",
             "400 frames in 5.0 seconds = 80.0 FPS",
-            "ZINK_EVAL: zink_fps=70.0",
-            "ZINK_EVAL: verdict=viable zink_fps=70.0",
+            "ZINK_EVAL: glxgears_render_rate_hz=70.0",
+            "ZINK_EVAL: verdict=viable glxgears_render_rate_hz=70.0",
             "ZINK_EVAL: done"
         )
 
@@ -84,7 +84,7 @@ class ServerSideZinkTest {
             when {
                 payload.startsWith("verdict=viable") -> {
                     viable = true
-                    Regex("""zink_fps=([\d.]+)""").find(payload)?.let {
+                    Regex("""glxgears_render_rate_hz=([\d.]+)""").find(payload)?.let {
                         fps = it.groupValues[1].toDoubleOrNull() ?: 0.0
                     }
                 }
@@ -94,8 +94,8 @@ class ServerSideZinkTest {
                         blockedReason = it.groupValues[1]
                     }
                 }
-                payload.startsWith("zink_fps=") -> {
-                    fps = payload.substringAfter("zink_fps=").toDoubleOrNull() ?: 0.0
+                payload.startsWith("glxgears_render_rate_hz=") -> {
+                    fps = payload.substringAfter("glxgears_render_rate_hz=").toDoubleOrNull() ?: 0.0
                 }
             }
         }

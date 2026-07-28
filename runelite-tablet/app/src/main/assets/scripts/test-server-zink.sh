@@ -77,10 +77,10 @@ GEARS_OUTPUT=$(proot-distro login ubuntu --shared-tmp -- bash -c "DISPLAY=:0 GAL
 echo "$GEARS_OUTPUT" | tee -a "$ZINK_LOG"
 
 ZINK_FPS=$(echo "$GEARS_OUTPUT" | grep "frames in" | tail -3 | awk -F'=' '{sum+=$2; n++} END {if(n>0) printf "%.1f",sum/n; else print "0"}')
-echo "ZINK_EVAL: zink_fps=$ZINK_FPS" | tee -a "$ZINK_LOG"
+echo "ZINK_EVAL: glxgears_render_rate_hz=$ZINK_FPS" | tee -a "$ZINK_LOG"
 
 # Cleanup
 kill $ZINK_PID 2>/dev/null || true
 
-echo "ZINK_EVAL: verdict=viable zink_fps=$ZINK_FPS" | tee -a "$ZINK_LOG"
+echo "ZINK_EVAL: verdict=viable glxgears_render_rate_hz=$ZINK_FPS" | tee -a "$ZINK_LOG"
 echo "ZINK_EVAL: done" | tee -a "$ZINK_LOG"

@@ -55,6 +55,13 @@ static inline uint64_t rlawt_ts_delta_us(const struct timespec *a, const struct 
 	return (uint64_t)(sec * 1000000LL + nsec / 1000);
 }
 
+static inline uint64_t rlawt_ts_delta_ns(const struct timespec *a, const struct timespec *b) {
+	/* returns a - b in nanoseconds; assumes a >= b */
+	int64_t sec = (int64_t)a->tv_sec - (int64_t)b->tv_sec;
+	int64_t nsec = (int64_t)a->tv_nsec - (int64_t)b->tv_nsec;
+	return (uint64_t)(sec * 1000000000LL + nsec);
+}
+
 static int rlawt_cmp_u64(const void *pa, const void *pb) {
 	uint64_t a = *(const uint64_t *)pa;
 	uint64_t b = *(const uint64_t *)pb;
@@ -634,6 +641,10 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_swapBuffers(JNIEnv *en
 	uint64_t gap_us = 0;
 	if (ctx->perf.last_post_swap_ts.tv_sec != 0 || ctx->perf.last_post_swap_ts.tv_nsec != 0) {
 		gap_us = rlawt_ts_delta_us(&t_pre_swap, &ctx->perf.last_post_swap_ts);
+		uint64_t producer_interval_ns =
+			rlawt_ts_delta_ns(&t_post_swap, &ctx->perf.last_post_swap_ts);
+		ctx->perf.producer_interval_ns_sum += producer_interval_ns;
+		ctx->perf.producer_interval_count++;
 	}
 	ctx->perf.swap_samples[slot] = swap_us;
 	ctx->perf.gap_samples[slot] = gap_us;
@@ -712,6 +723,18 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_swapBuffers(JNIEnv *en
 				(unsigned long long)s.mean, (unsigned long long)s.p50);
 		}
 
+		const size_t producer_first_seq =
+			ctx->perf.frame_idx - (size_t)ctx->perf.producer_interval_count;
+		const double produced_fps =
+			ctx->perf.producer_interval_ns_sum > 0
+				? ((double)ctx->perf.producer_interval_count * 1000000000.0) /
+					(double)ctx->perf.producer_interval_ns_sum
+				: 0.0;
+		const uint64_t producer_end_ns =
+			(uint64_t)t_post_swap.tv_sec * 1000000000ULL +
+			(uint64_t)t_post_swap.tv_nsec;
+		const char *capture_id = getenv("RLT_CAPTURE_ID");
+
 		RLAWT_LOG("[rlawt-perf] frame=%zu win=%zu  swap_us mean=%llu p50=%llu p95=%llu max=%llu  gap_us mean=%llu p50=%llu p95=%llu max=%llu  mkcur=%u glerr=%s%x%s%s%s\n",
 			ctx->perf.frame_idx, window,
 			(unsigned long long)swap_stats.mean, (unsigned long long)swap_stats.p50,
@@ -720,10 +743,20 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_swapBuffers(JNIEnv *en
 			(unsigned long long)gap_stats.p95, (unsigned long long)gap_stats.max,
 			ctx->perf.mkcur_count_window,
 			glerr ? "0x" : "", (unsigned)glerr, xsync_seg, gpu_seg, finish_seg);
+		RLAWT_LOG("RLT_FRAME_RATE_V1 run_id=%s stage=producer outcome=produced first_seq=%zu last_seq=%zu interval_count=%llu elapsed_ns=%llu end_monotonic_ns=%llu produced_fps=%.3f\n",
+			capture_id && *capture_id ? capture_id : "unknown",
+			producer_first_seq,
+			ctx->perf.frame_idx,
+			(unsigned long long)ctx->perf.producer_interval_count,
+			(unsigned long long)ctx->perf.producer_interval_ns_sum,
+			(unsigned long long)producer_end_ns,
+			produced_fps);
 
 		/* Reset per-window counters. */
 		ctx->perf.mkcur_count_window = 0;
 		ctx->perf.gpu_valid_count = 0;
+		ctx->perf.producer_interval_ns_sum = 0;
+		ctx->perf.producer_interval_count = 0;
 	}
 
 	rlawtUnlockAWT(env, ctx);

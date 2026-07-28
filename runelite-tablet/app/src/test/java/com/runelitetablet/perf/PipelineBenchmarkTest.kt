@@ -12,15 +12,15 @@ class PipelineBenchmarkTest {
     private val benchmark = PipelineBenchmark(logger)
 
     @Test
-    fun `parseFpsFromGlxgears extracts FPS from standard output`() {
-        assertEquals(60.0, PipelineBenchmark.parseFpsFromGlxgears("300 frames in 5.0 seconds = 60.0 FPS")!!, 0.01)
-        assertEquals(120.5, PipelineBenchmark.parseFpsFromGlxgears("602 frames in 5.0 seconds = 120.5 FPS")!!, 0.01)
+    fun `parseRenderRateFromGlxgears extracts render rate from standard output`() {
+        assertEquals(60.0, PipelineBenchmark.parseRenderRateFromGlxgears("300 frames in 5.0 seconds = 60.0 FPS")!!, 0.01)
+        assertEquals(120.5, PipelineBenchmark.parseRenderRateFromGlxgears("602 frames in 5.0 seconds = 120.5 FPS")!!, 0.01)
     }
 
     @Test
-    fun `parseFpsFromGlxgears returns null for non-matching lines`() {
-        assertNull(PipelineBenchmark.parseFpsFromGlxgears("Running synchronized to the vertical refresh."))
-        assertNull(PipelineBenchmark.parseFpsFromGlxgears(""))
+    fun `parseRenderRateFromGlxgears returns null for non-matching lines`() {
+        assertNull(PipelineBenchmark.parseRenderRateFromGlxgears("Running synchronized to the vertical refresh."))
+        assertNull(PipelineBenchmark.parseRenderRateFromGlxgears(""))
     }
 
     @Test
@@ -33,12 +33,12 @@ class PipelineBenchmarkTest {
             "300 frames in 5.0 seconds = 60.0 FPS",
             "350 frames in 5.0 seconds = 70.0 FPS",
             "400 frames in 5.0 seconds = 80.0 FPS",
-            "BENCHMARK: avg_fps=70.0 samples=3",
+            "BENCHMARK: glxgears_render_rate_hz=70.0 samples=3",
             "BENCHMARK: done"
         )
 
         val result = benchmark.parseOutput(output)
-        assertEquals(70.0, result.fps, 0.01)
+        assertEquals(70.0, result.glxgearsRenderRateHz, 0.01)
         assertEquals("virgl", result.glRenderer)
         assertEquals("3.1 Mesa 23.1.0", result.glVersion)
         assertNull(result.error)
@@ -52,7 +52,7 @@ class PipelineBenchmarkTest {
         )
 
         val result = benchmark.parseOutput(output)
-        assertEquals(0.0, result.fps, 0.01)
+        assertEquals(0.0, result.glxgearsRenderRateHz, 0.01)
         assertEquals("glxgears_not_found", result.error)
     }
 
@@ -66,7 +66,7 @@ class PipelineBenchmarkTest {
         )
 
         val result = benchmark.parseOutput(output)
-        assertEquals(0.0, result.fps, 0.01)
+        assertEquals(0.0, result.glxgearsRenderRateHz, 0.01)
         assertEquals("no_fps_output", result.error)
     }
 
@@ -80,6 +80,11 @@ class PipelineBenchmarkTest {
 
         benchmark.parseOutput(output)
         val perfLogs = logger.entriesWithTag("PERF")
-        assertTrue(perfLogs.any { it.message.contains("BENCHMARK:") && it.message.contains("fps=60.0") })
+        assertTrue(
+            perfLogs.any {
+                it.message.contains("BENCHMARK:") &&
+                    it.message.contains("glxgears_render_rate_hz=60.0")
+            }
+        )
     }
 }

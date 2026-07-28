@@ -24,13 +24,10 @@ interface Logger {
     fun perf(message: String, correlationId: String? = null) = i("PERF", message, correlationId)
 
     // 9.2 — Graphics/Pipeline logging methods
-    fun frame(fps: Double, jankCount: Int, p99Ms: Double, heapMb: Int, message: String, correlationId: String? = null) =
-        i("FRAME", "fps=%.1f jank=%d p99=%.1fms heap=%dMB %s".format(fps, jankCount, p99Ms, heapMb, message), correlationId)
-
     fun hostVsync(callbackRate: Double, missedDeadlines: Int, p99Ms: Double, targetHz: Int, message: String, correlationId: String? = null) =
         i(
             "HOST_VSYNC",
-            "host_vsync_callback_rate=%.1f missed_deadlines=%d p99=%.1fms target_hz=%d %s"
+            "host_vsync_callback_rate_hz=%.1f missed_deadlines=%d p99=%.1fms target_hz=%d %s"
                 .format(callbackRate, missedDeadlines, p99Ms, targetHz, message),
             correlationId
         )

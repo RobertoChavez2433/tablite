@@ -21,4 +21,20 @@ class TelemetryRedactorTest {
         assertTrue(redacted.contains("JX_SESSION_ID=***"))
         assertTrue(redacted.contains("Bearer ***"))
     }
+
+    @Test
+    fun `removes chat and input content while preserving adjacent frame telemetry`() {
+        val source = """
+            RLT_FRAME_RATE_V1 run_id=test produced_fps=21.5
+            [Client] Chat message type CLAN: private words
+            keyEvent=typed-secret
+            [rlawt-perf] frame=30 swap_us mean=23000
+        """.trimIndent()
+
+        val redacted = TelemetryRedactor.redact(source)
+        assertFalse(redacted.contains("private words"))
+        assertFalse(redacted.contains("typed-secret"))
+        assertTrue(redacted.contains("RLT_FRAME_RATE_V1"))
+        assertTrue(redacted.contains("[rlawt-perf]"))
+    }
 }

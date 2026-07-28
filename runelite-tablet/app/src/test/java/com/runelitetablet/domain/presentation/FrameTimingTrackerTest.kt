@@ -18,7 +18,7 @@ class FrameTimingTrackerTest {
         for (i in 0 until 120) {
             tracker.recordFrame(i * intervalNs)
         }
-        val fps = tracker.getAverageFps(120)
+        val fps = tracker.getAverageRateHz(120)
         assertEquals(120.0, fps, 1.0) // within 1 fps tolerance
     }
 
@@ -28,7 +28,7 @@ class FrameTimingTrackerTest {
         for (i in 0 until 60) {
             tracker.recordFrame(i * intervalNs)
         }
-        val fps = tracker.getAverageFps(60)
+        val fps = tracker.getAverageRateHz(60)
         assertEquals(60.0, fps, 1.0)
     }
 
@@ -42,7 +42,7 @@ class FrameTimingTrackerTest {
             time += intervalNs
             tracker.recordFrame(time)
         }
-        val fps = tracker.getAverageFps(10)
+        val fps = tracker.getAverageRateHz(10)
         // Average interval should be around 9ms -> ~111 fps
         assertTrue("fps was $fps", fps > 100 && fps < 130)
     }
@@ -84,13 +84,13 @@ class FrameTimingTrackerTest {
 
     @Test
     fun `zero frames returns zero fps`() {
-        assertEquals(0.0, tracker.getAverageFps(), 0.001)
+        assertEquals(0.0, tracker.getAverageRateHz(), 0.001)
     }
 
     @Test
     fun `one frame returns zero fps`() {
         tracker.recordFrame(0L)
-        assertEquals(0.0, tracker.getAverageFps(), 0.001)
+        assertEquals(0.0, tracker.getAverageRateHz(), 0.001)
     }
 
     @Test
@@ -109,7 +109,7 @@ class FrameTimingTrackerTest {
         }
         tracker.reset()
         assertEquals(0, tracker.getFrameCount())
-        assertEquals(0.0, tracker.getAverageFps(), 0.001)
+        assertEquals(0.0, tracker.getAverageRateHz(), 0.001)
     }
 
     @Test

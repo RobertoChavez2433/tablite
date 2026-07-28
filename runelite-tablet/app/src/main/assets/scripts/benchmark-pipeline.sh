@@ -34,5 +34,5 @@ fi
 
 # Calculate average FPS
 AVG_FPS=$(echo "$FPS_LINES" | awk -F'=' '{sum += $2; n++} END {if (n>0) printf "%.1f", sum/n; else print "0"}')
-echo "BENCHMARK: avg_fps=$AVG_FPS samples=$(echo "$FPS_LINES" | wc -l)"
+echo "BENCHMARK: glxgears_render_rate_hz=$AVG_FPS samples=$(echo "$FPS_LINES" | wc -l)"
 echo "BENCHMARK: done"

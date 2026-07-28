@@ -109,6 +109,8 @@ typedef struct {
 	size_t window;           /* samples per window; clamped to 1..RLAWT_PERF_MAX_WINDOW */
 	size_t frame_idx;        /* monotonically increasing */
 	struct timespec last_post_swap_ts; /* zero-initialized; zero means "no prior frame" */
+	uint64_t producer_interval_ns_sum; /* exact post-swap to post-swap elapsed time */
+	uint64_t producer_interval_count;  /* distinct producer-sequence intervals in current window */
 
 	uint64_t *swap_samples;  /* window-sized; allocated once at createGLContext */
 	uint64_t *gap_samples;
