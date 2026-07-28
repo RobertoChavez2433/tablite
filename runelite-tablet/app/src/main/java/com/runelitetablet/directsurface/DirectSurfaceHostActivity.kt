@@ -1,9 +1,16 @@
 package com.runelitetablet.directsurface
 
+import android.os.Build
 import android.os.Bundle
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.runelitetablet.logging.AppLog
 
 /**
@@ -31,6 +38,15 @@ class DirectSurfaceHostActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+        @Suppress("DEPRECATION")
+        window.attributes = window.attributes.apply { preferredRefreshRate = 120f }
+
         abstractName = intent.getStringExtra(EXTRA_ABSTRACT_NAME)
         AppLog.lifecycle("DirectSurfaceHost.onCreate intent=$intent abstractName=$abstractName")
 
@@ -39,6 +55,15 @@ class DirectSurfaceHostActivity : ComponentActivity() {
                 override fun surfaceCreated(holder: SurfaceHolder) {
                     val s = holder.surface
                     AppLog.lifecycle("DirectSurfaceHost.surfaceCreated holder=$holder surface=$s isValid=${s.isValid}")
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        runCatching {
+                            s.setFrameRate(120f, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+                        }.onSuccess {
+                            AppLog.i(TAG, "DirectSurfaceHost.surfaceCreated setFrameRate(120Hz) OK")
+                        }.onFailure {
+                            AppLog.w(TAG, "DirectSurfaceHost.surfaceCreated setFrameRate(120Hz) failed: ${it.message}")
+                        }
+                    }
                     val srv = RlawtSurfaceServer.start(s, abstractName)
                     if (srv == null) {
                         AppLog.e(TAG, "RlawtSurfaceServer.start returned null in surfaceCreated")
@@ -60,6 +85,15 @@ class DirectSurfaceHostActivity : ComponentActivity() {
             })
         }
         setContentView(surfaceView)
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        val nextName = intent.getStringExtra(EXTRA_ABSTRACT_NAME)
+        AppLog.lifecycle("DirectSurfaceHost.onNewIntent intent=$intent abstractName=$nextName serverRunning=${server != null}")
+        if (!nextName.isNullOrBlank()) {
+            abstractName = nextName
+        }
     }
 
     override fun onStart() {

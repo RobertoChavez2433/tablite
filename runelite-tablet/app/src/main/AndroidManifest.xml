@@ -79,6 +79,7 @@
         <activity
             android:name=".directsurface.DirectSurfaceHostActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
 
         <service

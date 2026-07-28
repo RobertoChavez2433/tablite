@@ -12,6 +12,7 @@ import com.runelitetablet.domain.command.CommandRunner
 import com.runelitetablet.domain.installer.PackageChecker
 import com.runelitetablet.domain.logging.Logger
 import com.runelitetablet.domain.setup.ScriptDeployer
+import com.runelitetablet.directsurface.DirectSurfaceControlServer
 import com.runelitetablet.presentation.PresentationBackend
 import com.runelitetablet.session.RuneLiteSessionService
 import com.runelitetablet.session.SessionState
@@ -158,8 +159,17 @@ class LaunchCoordinator(
             return false
         }
         presentationBackend.applyLaunchPreferences(context, displayPreferences)
+        val useDirectSurface = launchPreferences.useDirectSurface
         val presentationIntent = presentationBackend.createLaunchIntent(context)
-        if (presentationIntent != null && presentationBackend.shouldForegroundBeforeBootstrap()) {
+        if (useDirectSurface) {
+            DirectSurfaceControlServer.ensureStarted(context.applicationContext)
+            logger?.state(
+                "launchInternal: useDirectSurface=true — direct control endpoint ${DirectSurfaceControlServer.CONTROL_ENDPOINT} ready; " +
+                    "foregrounding ${presentationBackend.id} for login and deferring DirectSurfaceHostActivity until rlawt createGLContext",
+                correlationId = correlationId
+            )
+        }
+        if (presentationIntent != null && (presentationBackend.shouldForegroundBeforeBootstrap() || useDirectSurface)) {
             logger?.d("LAUNCH", "launchInternal: foregrounding ${presentationBackend.id} before bootstrap", correlationId = correlationId)
             orchestrator.actions?.launchIntent(presentationIntent); delay(700)
         }
@@ -206,7 +216,7 @@ class LaunchCoordinator(
             commandRunner.launchBackground(commandPath = scriptPath, arguments = arguments)
         }
         logger?.state("launchInternal: command dispatched success=$success useNative=$useNative", correlationId = correlationId)
-        if (success && presentationIntent != null && presentationBackend.shouldWaitForReadySignal()) {
+        if (success && presentationIntent != null && presentationBackend.shouldWaitForReadySignal() && !useDirectSurface) {
             waitForDisplayReadyAndSwitch(presentationIntent)
         }
         return success

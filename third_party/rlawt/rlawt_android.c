@@ -39,12 +39,15 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -141,6 +144,231 @@ static int rlawt_connect_consumer(const char *override_name) {
 	RLAWT_LOG("connected to consumer @%s (fd=%d)\n",
 		override_name && *override_name ? override_name : RLAWT_SURFACE_ABSTRACT_NAME, fd);
 	return fd;
+}
+
+#define RLAWT_ACTIVITY_CONTROL_ABSTRACT_NAME "rlt-direct-control"
+#define RLAWT_ACTIVITY_CONTROL_HOST "127.0.0.1"
+#define RLAWT_ACTIVITY_CONTROL_PORT 49382
+
+static bool rlawt_write_all(int fd, const char *buf, size_t len);
+
+static bool rlawt_request_surface_activity_tcp(const char *surface_name) {
+	const char *host = getenv("RLAWT_ACTIVITY_CONTROL_HOST");
+	if (!host || !*host) host = RLAWT_ACTIVITY_CONTROL_HOST;
+	int port = RLAWT_ACTIVITY_CONTROL_PORT;
+	const char *port_env = getenv("RLAWT_ACTIVITY_CONTROL_PORT");
+	if (port_env && *port_env) {
+		int parsed = atoi(port_env);
+		if (parsed > 0 && parsed < 65536) port = parsed;
+	}
+	RLAWT_LOG("requesting DirectSurfaceHostActivity via tcp %s:%d surface=@%s\n", host, port, surface_name);
+
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0) {
+		RLAWT_LOG("tcp control socket() failed errno=%d (%s)\n", errno, strerror(errno));
+		return false;
+	}
+
+	struct sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons((uint16_t)port);
+	if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+		RLAWT_LOG("tcp control invalid host '%s'\n", host);
+		close(fd);
+		return false;
+	}
+	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		RLAWT_LOG("tcp control connect(%s:%d) failed errno=%d (%s)\n", host, port, errno, strerror(errno));
+		close(fd);
+		return false;
+	}
+
+	char req[160];
+	int req_len = snprintf(req, sizeof(req), "START %s\n", surface_name);
+	if (req_len <= 0 || req_len >= (int)sizeof(req)) {
+		RLAWT_LOG("tcp control request format failed len=%d surface=@%s\n", req_len, surface_name);
+		close(fd);
+		return false;
+	}
+	if (!rlawt_write_all(fd, req, (size_t)req_len)) {
+		RLAWT_LOG("tcp control write failed errno=%d (%s)\n", errno, strerror(errno));
+		close(fd);
+		return false;
+	}
+
+	char resp[128];
+	ssize_t rn = read(fd, resp, sizeof(resp) - 1);
+	if (rn < 0) {
+		RLAWT_LOG("tcp control read failed errno=%d (%s)\n", errno, strerror(errno));
+		close(fd);
+		return false;
+	}
+	resp[rn > 0 ? rn : 0] = '\0';
+	close(fd);
+	RLAWT_LOG("tcp control response bytes=%zd text=%s", rn, rn > 0 ? resp : "(empty)\n");
+	return rn >= 2 && strncmp(resp, "OK", 2) == 0;
+}
+
+static socklen_t rlawt_fill_abstract_addr_name(struct sockaddr_un *addr, const char *name) {
+	size_t name_len = strlen(name);
+	if (name_len >= sizeof(addr->sun_path) - 1) name_len = sizeof(addr->sun_path) - 1;
+	memset(addr, 0, sizeof(*addr));
+	addr->sun_family = AF_UNIX;
+	addr->sun_path[0] = '\0';
+	memcpy(&addr->sun_path[1], name, name_len);
+	return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + name_len);
+}
+
+static bool rlawt_write_all(int fd, const char *buf, size_t len) {
+	size_t off = 0;
+	while (off < len) {
+		ssize_t n = send(fd, buf + off, len - off, MSG_NOSIGNAL);
+		if (n < 0) {
+			if (errno == EINTR) continue;
+			return false;
+		}
+		if (n == 0) return false;
+		off += (size_t)n;
+	}
+	return true;
+}
+
+static bool rlawt_request_surface_activity(const char *surface_name) {
+	if (!getenv("RLAWT_DISABLE_TCP_ACTIVITY_CONTROL") &&
+			rlawt_request_surface_activity_tcp(surface_name)) {
+		return true;
+	}
+
+	const char *control_name = getenv("RLAWT_ACTIVITY_CONTROL_NAME");
+	if (!control_name || !*control_name) control_name = RLAWT_ACTIVITY_CONTROL_ABSTRACT_NAME;
+	RLAWT_LOG("requesting DirectSurfaceHostActivity via control @%s surface=@%s\n", control_name, surface_name);
+
+	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0) {
+		RLAWT_LOG("control socket() failed errno=%d (%s)\n", errno, strerror(errno));
+		return false;
+	}
+
+	struct sockaddr_un addr;
+	socklen_t addr_len = rlawt_fill_abstract_addr_name(&addr, control_name);
+	if (connect(fd, (struct sockaddr *)&addr, addr_len) < 0) {
+		RLAWT_LOG("control connect(@%s) failed errno=%d (%s)\n", control_name, errno, strerror(errno));
+		close(fd);
+		return false;
+	}
+
+	char req[160];
+	int req_len = snprintf(req, sizeof(req), "START %s\n", surface_name);
+	if (req_len <= 0 || req_len >= (int)sizeof(req)) {
+		RLAWT_LOG("control request format failed len=%d surface=@%s\n", req_len, surface_name);
+		close(fd);
+		return false;
+	}
+	if (!rlawt_write_all(fd, req, (size_t)req_len)) {
+		RLAWT_LOG("control write failed errno=%d (%s)\n", errno, strerror(errno));
+		close(fd);
+		return false;
+	}
+
+	char resp[128];
+	ssize_t rn = read(fd, resp, sizeof(resp) - 1);
+	if (rn < 0) {
+		RLAWT_LOG("control read failed errno=%d (%s)\n", errno, strerror(errno));
+		close(fd);
+		return false;
+	}
+	resp[rn > 0 ? rn : 0] = '\0';
+	close(fd);
+	RLAWT_LOG("control response bytes=%zd text=%s", rn, rn > 0 ? resp : "(empty)\n");
+	return rn >= 2 && strncmp(resp, "OK", 2) == 0;
+}
+
+static void rlawt_start_surface_activity_via_am(const char *name) {
+	RLAWT_LOG("falling back to /system/bin/am start DirectSurfaceHostActivity abstract_name=%s\n", name);
+	int pipefd[2] = {-1, -1};
+	bool capture = pipe(pipefd) == 0;
+	if (!capture) {
+		RLAWT_LOG("pipe for am output failed errno=%d (%s)\n", errno, strerror(errno));
+	}
+	pid_t pid = fork();
+	if (pid < 0) {
+		RLAWT_LOG("fork for am start failed errno=%d (%s)\n", errno, strerror(errno));
+		if (capture) {
+			close(pipefd[0]);
+			close(pipefd[1]);
+		}
+		return;
+	}
+	if (pid == 0) {
+		if (capture) {
+			dup2(pipefd[1], STDOUT_FILENO);
+			dup2(pipefd[1], STDERR_FILENO);
+			close(pipefd[0]);
+			close(pipefd[1]);
+		}
+		execl("/system/bin/am", "am",
+			"start",
+			"-n", "com.runelitetablet/.directsurface.DirectSurfaceHostActivity",
+			"--es", "rlt.abstract_name", name,
+			(char *)NULL);
+		_exit(127);
+	}
+
+	if (capture) {
+		close(pipefd[1]);
+		char buf[512];
+		ssize_t n;
+		while ((n = read(pipefd[0], buf, sizeof(buf) - 1)) > 0) {
+			buf[n] = '\0';
+			RLAWT_LOG("am output: %s", buf);
+		}
+		close(pipefd[0]);
+	}
+
+	int status = 0;
+	if (waitpid(pid, &status, 0) < 0) {
+		RLAWT_LOG("waitpid(am start) failed errno=%d (%s)\n", errno, strerror(errno));
+		return;
+	}
+	if (WIFEXITED(status)) {
+		RLAWT_LOG("am start exited code=%d raw=0x%x\n", WEXITSTATUS(status), status);
+	} else if (WIFSIGNALED(status)) {
+		RLAWT_LOG("am start signaled signal=%d raw=0x%x\n", WTERMSIG(status), status);
+	} else {
+		RLAWT_LOG("am start ended raw=0x%x\n", status);
+	}
+}
+
+static void rlawt_start_surface_activity(const char *override_name) {
+	if (getenv("RLAWT_NO_ACTIVITY_START")) {
+		RLAWT_LOG("activity start skipped by RLAWT_NO_ACTIVITY_START\n");
+		return;
+	}
+	const char *name = override_name && *override_name ? override_name : RLAWT_SURFACE_ABSTRACT_NAME;
+	if (rlawt_request_surface_activity(name)) {
+		RLAWT_LOG("DirectSurfaceHostActivity request accepted by app control socket\n");
+		return;
+	}
+	rlawt_start_surface_activity_via_am(name);
+}
+
+static int rlawt_connect_consumer_with_retry(const char *override_name) {
+	int fd = rlawt_connect_consumer(override_name);
+	if (fd >= 0) return fd;
+
+	rlawt_start_surface_activity(override_name);
+
+	for (int attempt = 1; attempt <= 40; attempt++) {
+		usleep(125000);
+		fd = rlawt_connect_consumer(override_name);
+		if (fd >= 0) {
+			RLAWT_LOG("consumer connected after activity start attempt=%d\n", attempt);
+			return fd;
+		}
+	}
+	RLAWT_LOG("consumer connect failed after activity start retries\n");
+	return -1;
 }
 
 /* Send a header-only or header+body message with no FDs. */
@@ -530,7 +758,7 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_createGLContext(JNIEnv
 
 	/* Override is an abstract namespace NAME (no leading NUL). */
 	const char *sock_override = getenv("RLAWT_SURFACE_NAME");
-	ctx->sock_fd = rlawt_connect_consumer(sock_override);
+	ctx->sock_fd = rlawt_connect_consumer_with_retry(sock_override);
 	if (ctx->sock_fd < 0) {
 		rlawtThrow(env, "rlawt direct-surface: cannot connect to consumer");
 		return;

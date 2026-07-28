@@ -342,8 +342,14 @@ echo "X11 socket ready" | tee -a "$LOGFILE"
 export DISPLAY=:0
 
 # Launch hybrid X11 host activity (undecorated frame). Mirrors proot launcher.
-# Resolution/fullscreen prefs already set above; nothing else to do here.
-am start --activity-single-top --activity-clear-top -n "$X11_HOST_COMPONENT" >/dev/null 2>&1 || true
+# In direct-surface mode the Android app foregrounds this before dispatching
+# us, because /system/bin/am from Termux's UID is rejected on current Android
+# builds (com.android.shell package / com.termux UID mismatch).
+if [[ "${RLT_DIRECT_SURFACE:-0}" != "1" ]]; then
+    am start --activity-single-top --activity-clear-top -n "$X11_HOST_COMPONENT" >/dev/null 2>&1 || true
+else
+    echo "DIRECT-SURFACE-DIAG Hybrid host foreground handled by app LaunchCoordinator" | tee -a "$LOGFILE"
+fi
 
 # ===================================================================
 # Start VirGL server (Termux-native already — no change from proot path)
@@ -552,19 +558,35 @@ if [ -d "$ROOTFS_PATH/root/.runelite/profiles2" ] \
         else
             echo 'runelite.clientMaximized=true' >> "$CFG"
         fi
-        # Issue #57: GPU plugin's "UI scaling: Hybrid" only scales the game canvas,
-        # not the surrounding Swing chrome. With -Dsun.java2d.uiScale=2 the JVM
-        # already 2x-scales every AWT/Swing component (sidebar, settings, fonts);
-        # if RL ALSO shader-scales the canvas we end up with a 2x main viewport
-        # plus an effectively-1x sidebar (Swing scaled but canvas double-scaled).
-        # Forcing gpu.uiScalingMode=NONE disables RL's shader scaling so uiScale
-        # alone controls every pixel — uniform across canvas and chrome.
-        if grep -q '^gpu\.uiScalingMode=' "$CFG"; then
-            sed -i 's/^gpu\.uiScalingMode=.*/gpu.uiScalingMode=NONE/' "$CFG"
+        if grep -q '^runelite\.gpuplugin=' "$CFG"; then
+            sed -i 's/^runelite\.gpuplugin=.*/runelite.gpuplugin=true/' "$CFG"
         else
-            echo 'gpu.uiScalingMode=NONE' >> "$CFG"
+            echo 'runelite.gpuplugin=true' >> "$CFG"
         fi
-        echo "RL-CONFIG native: patched $(basename "$CFG") gameSize=${RLT_GAME_SIZE_W}x${RLT_GAME_SIZE_H} resize=KEEP_WINDOW_SIZE stretched=100 keepAspect=true clientMaximized=true gpu.uiScalingMode=NONE" | tee -a "$LOGFILE"
+        if grep -q '^gpu\.unlockFps=' "$CFG"; then
+            sed -i 's/^gpu\.unlockFps=.*/gpu.unlockFps=true/' "$CFG"
+        else
+            echo 'gpu.unlockFps=true' >> "$CFG"
+        fi
+        if grep -q '^gpu\.fpsTarget=' "$CFG"; then
+            sed -i 's/^gpu\.fpsTarget=.*/gpu.fpsTarget=120/' "$CFG"
+        else
+            echo 'gpu.fpsTarget=120' >> "$CFG"
+        fi
+        if grep -q '^gpu\.vsyncMode=' "$CFG"; then
+            sed -i 's/^gpu\.vsyncMode=.*/gpu.vsyncMode=OFF/' "$CFG"
+        else
+            echo 'gpu.vsyncMode=OFF' >> "$CFG"
+        fi
+        # RuneLite 1.12.24 no longer accepts NONE for gpu.uiScalingMode; it
+        # throws during config unmarshal and resets to HYBRID anyway. Keep the
+        # value valid so the GPU plugin can start cleanly.
+        if grep -q '^gpu\.uiScalingMode=' "$CFG"; then
+            sed -i 's/^gpu\.uiScalingMode=.*/gpu.uiScalingMode=HYBRID/' "$CFG"
+        else
+            echo 'gpu.uiScalingMode=HYBRID' >> "$CFG"
+        fi
+        echo "RL-CONFIG native: patched $(basename "$CFG") gameSize=${RLT_GAME_SIZE_W}x${RLT_GAME_SIZE_H} resize=KEEP_WINDOW_SIZE stretched=100 keepAspect=true clientMaximized=true gpuplugin=true fpsTarget=120 unlockFps=true vsync=OFF gpu.uiScalingMode=HYBRID" | tee -a "$LOGFILE"
         # S82 verification: re-read each key from disk and confirm it matches what
         # we *think* we wrote. Without this, a sed-pattern bug or write-permission
         # failure would silently leave RL on the prior values and we'd re-debug
@@ -583,7 +605,11 @@ if [ -d "$ROOTFS_PATH/root/.runelite/profiles2" ] \
         _expect "stretchedmode.scalingFactor"  "100"
         _expect "stretchedmode.keepAspectRatio" "true"
         _expect "runelite.clientMaximized"     "true"
-        _expect "gpu.uiScalingMode"            "NONE"
+        _expect "runelite.gpuplugin"           "true"
+        _expect "gpu.unlockFps"                "true"
+        _expect "gpu.fpsTarget"                "120"
+        _expect "gpu.vsyncMode"                "OFF"
+        _expect "gpu.uiScalingMode"            "HYBRID"
         unset -f _expect
     done
 else
@@ -788,20 +814,33 @@ if [[ "${RLT_DIRECT_SURFACE:-0}" == "1" ]]; then
     export RLAWT_INITIAL_WIDTH="${DS_W}"
     export RLAWT_INITIAL_HEIGHT="${DS_H}"
     export RLAWT_SURFACE_NAME="${RLAWT_SURFACE_NAME:-rlt-rlawt-surface}"
+    export RLAWT_ACTIVITY_CONTROL_HOST="${RLAWT_ACTIVITY_CONTROL_HOST:-127.0.0.1}"
+    export RLAWT_ACTIVITY_CONTROL_PORT="${RLAWT_ACTIVITY_CONTROL_PORT:-49382}"
+    export RLAWT_ACTIVITY_CONTROL_NAME="${RLAWT_ACTIVITY_CONTROL_NAME:-rlt-direct-control}"
     # Per-frame CSV side-file for swap_us/gap_us correlation.
     export RLAWT_PERF_CSV="${LOGDIR:-$HOME/.rlt-logs}/rlawt-direct-surface-frames.csv"
     mkdir -p "$(dirname "$RLAWT_PERF_CSV")"
     echo "  RLAWT_INITIAL_WIDTH=$RLAWT_INITIAL_WIDTH RLAWT_INITIAL_HEIGHT=$RLAWT_INITIAL_HEIGHT" | tee -a "$LOGFILE"
+    echo "  RLAWT_ACTIVITY_CONTROL=${RLAWT_ACTIVITY_CONTROL_HOST}:${RLAWT_ACTIVITY_CONTROL_PORT} local_fallback=@$RLAWT_ACTIVITY_CONTROL_NAME" | tee -a "$LOGFILE"
     echo "  RLAWT_PERF_CSV=$RLAWT_PERF_CSV" | tee -a "$LOGFILE"
+    echo "  DIRECT-SURFACE-DIAG LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>} PATH=$PATH" | tee -a "$LOGFILE"
+    if command -v sha256sum >/dev/null 2>&1; then
+        echo "  DIRECT-SURFACE-DIAG rlawt-jar-sha256=$(sha256sum "$RLAWT_BIONIC_JAR" | awk '{print $1}')" | tee -a "$LOGFILE"
+    fi
+    echo "  DIRECT-SURFACE-DIAG system-lib-files:" | tee -a "$LOGFILE"
+    ls -l /system/lib64/liblzma.so /system/lib64/libunwindstack.so /system/lib64/libEGL.so /system/lib64/libGLESv3.so >>"$LOGFILE" 2>&1 || true
+    if command -v readelf >/dev/null 2>&1; then
+        echo "  DIRECT-SURFACE-DIAG libEGL NEEDED:" | tee -a "$LOGFILE"
+        readelf -d /system/lib64/libEGL.so 2>/dev/null | grep NEEDED >>"$LOGFILE" || true
+        echo "  DIRECT-SURFACE-DIAG libunwindstack/liblzma symbols:" | tee -a "$LOGFILE"
+        readelf -Ws /system/lib64/libunwindstack.so 2>/dev/null | grep Xzs_Construct >>"$LOGFILE" || true
+        readelf -Ws /system/lib64/liblzma.so 2>/dev/null | grep Xzs_Construct >>"$LOGFILE" || true
+    fi
 
-    # Make sure DirectSurfaceHostActivity is up before we launch RuneLite —
-    # the rlawt JVM connects on PRODUCER_HELLO. Best-effort: am start; if the
-    # activity exits unexpectedly the rlawt connect will fail with a logged
-    # errno=ECONNREFUSED.
-    am start -n "com.runelitetablet/.directsurface.DirectSurfaceHostActivity" \
-        --es "rlt.abstract_name" "$RLAWT_SURFACE_NAME" >>"$LOGFILE" 2>&1 || \
-        echo "[direct-surface] am start FAILED — see $LOGFILE" >&2
-    sleep 0.5
+    # Keep the X11/Hybrid login path visible until the rlawt direct-surface
+    # backend actually creates a GPU context. At that point the native producer
+    # starts DirectSurfaceHostActivity and connects to its consumer socket.
+    echo "  DirectSurfaceHostActivity will start on first rlawt createGLContext" | tee -a "$LOGFILE"
 fi
 
 echo "=== Invoking JVM ===" | tee -a "$LOGFILE"

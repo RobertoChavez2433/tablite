@@ -49,18 +49,46 @@ public final class AWTContext
 
 	public synchronized static void loadNatives()
 	{
+		log("loadNatives enter nativesLoaded=" + nativesLoaded
+			+ " os=" + System.getProperty("os.name")
+			+ " arch=" + System.getProperty("os.arch")
+			+ " direct=" + System.getenv("RLT_DIRECT_SURFACE")
+			+ " java.library.path=" + System.getProperty("java.library.path")
+			+ " LD_LIBRARY_PATH=" + System.getenv("LD_LIBRARY_PATH"));
 		if (nativesLoaded)
 		{
+			log("loadNatives already loaded");
 			return;
 		}
 
 		// this needs to be in core since doing this in hub plugins will break core gpu
-		System.loadLibrary("jawt");
+		try
+		{
+			log("loading jawt via System.loadLibrary");
+			System.loadLibrary("jawt");
+			log("loaded jawt");
+		}
+		catch (UnsatisfiedLinkError e)
+		{
+			log("failed loading jawt: " + e.getMessage());
+			throw e;
+		}
+		preloadAndroidEglForDirectSurface();
 
 		String overridePath = System.getProperty("runelite.rlawtpath");
 		if (overridePath != null)
 		{
-			System.load(overridePath);
+			try
+			{
+				log("loading override rlawt path=" + overridePath);
+				System.load(overridePath);
+				log("loaded override rlawt path=" + overridePath);
+			}
+			catch (UnsatisfiedLinkError e)
+			{
+				log("failed loading override rlawt path=" + overridePath + ": " + e.getMessage());
+				throw e;
+			}
 			nativesLoaded = true;
 			return;
 		}
@@ -85,6 +113,7 @@ public final class AWTContext
 		}
 
 		String path = os + "-" + arch + "/" + name;
+		log("resolved bundled rlawt resource path=" + path);
 		try (InputStream is = AWTContext.class.getResourceAsStream(path))
 		{
 			if (is == null)
@@ -95,12 +124,54 @@ public final class AWTContext
 			Path temp = Files.createTempFile("", name);
 			temp.toFile().deleteOnExit();
 			Files.copy(is, temp, StandardCopyOption.REPLACE_EXISTING);
-			System.load(temp.toAbsolutePath().toString());
+			String tempPath = temp.toAbsolutePath().toString();
+			long tempSize = Files.size(temp);
+			log("loading extracted rlawt path=" + tempPath + " size=" + tempSize);
+			try
+			{
+				System.load(tempPath);
+				log("loaded extracted rlawt path=" + tempPath);
+			}
+			catch (UnsatisfiedLinkError e)
+			{
+				log("failed loading extracted rlawt path=" + tempPath + ": " + e.getMessage());
+				throw e;
+			}
 			nativesLoaded = true;
+			log("loadNatives complete");
 		}
 		catch (IOException e)
 		{
 			throw new RuntimeException(e);
+		}
+	}
+
+	private static void preloadAndroidEglForDirectSurface()
+	{
+		if (!"1".equals(System.getenv("RLT_DIRECT_SURFACE")))
+		{
+			return;
+		}
+
+		String arch = System.getProperty("os.arch", "");
+		String libDir = arch.contains("64") || arch.contains("aarch64")
+			? "/system/lib64/"
+			: "/system/lib/";
+		log("direct preload begin libDir=" + libDir
+			+ " LD_LIBRARY_PATH=" + System.getenv("LD_LIBRARY_PATH"));
+		for (String lib : new String[] { "liblzma.so", "libunwindstack.so", "libEGL.so", "libGLESv3.so" })
+		{
+			String path = libDir + lib;
+			try
+			{
+				log("preloading " + path);
+				System.load(path);
+				log("preloaded " + path);
+			}
+			catch (UnsatisfiedLinkError e)
+			{
+				log("preload failed " + path + ": " + e.getMessage());
+			}
 		}
 	}
 

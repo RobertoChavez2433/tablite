@@ -960,6 +960,7 @@ remove_runelite_setting() {
 upsert_runelite_setting "gpu.unlockFps" "$RUNELITE_UNLOCK_FPS"
 upsert_runelite_setting "gpu.fpsTarget" "$RUNELITE_TARGET_FPS"
 upsert_runelite_setting "gpu.vsyncMode" "$RUNELITE_VSYNC_MODE"
+upsert_runelite_setting "runelite.gpuplugin" "true"
 echo "Configured RuneLite GPU settings: unlockFps=$RUNELITE_UNLOCK_FPS fpsTarget=$RUNELITE_TARGET_FPS vsyncMode=$RUNELITE_VSYNC_MODE" >&2
 upsert_runelite_setting "fpscontrol.limitFps" "false"
 upsert_runelite_setting "fpscontrol.limitFpsUnfocused" "false"
@@ -970,10 +971,10 @@ remove_runelite_setting "gpu.drawDistance"
 remove_runelite_setting "gpu.expandedMapLoadingChunks"
 remove_runelite_setting "gpu.smoothBanding"
 remove_runelite_setting "gpu.antiAliasingMode"
-# Issue #57: force gpu.uiScalingMode=NONE so RL's shader-scaler doesn't compose
-# with the launcher's --scale uiScale and double-up on the canvas while leaving
-# the Swing sidebar at 1x. Setting NONE makes uiScale the single source of truth.
-upsert_runelite_setting "gpu.uiScalingMode" "NONE"
+# RuneLite 1.12.24 rejects NONE for gpu.uiScalingMode and falls back to HYBRID
+# after logging a config unmarshal exception. Keep the profile valid so GPU
+# startup is not blocked by a known-bad enum value.
+upsert_runelite_setting "gpu.uiScalingMode" "HYBRID"
 remove_runelite_setting "gpu.anisotropicFilteringLevel"
 remove_runelite_setting "gpu.removeVertexSnapping"
 echo "Configured RuneLite GPU profile: default (cleared branch-forced GPU profile overrides)" >&2

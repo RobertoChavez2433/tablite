@@ -102,15 +102,17 @@ target_link_options(rlawt PRIVATE
 
 if(RLAWT_DIRECT_SURFACE)
     # Direct-Android-surface: link against NDK Bionic libs only. EGL/GLES3/
-    # nativewindow are part of the NDK sysroot at this API level. libjawt.so
-    # is still harvested from Termux openjdk-21-x because the NDK sysroot
-    # does not ship a JAWT stub.
+    # nativewindow are part of the NDK sysroot at this API level. AHardwareBuffer
+    # symbols are provided by libnativewindow on the target; linking libandroid
+    # pulls in libandroid_runtime and a much larger Android framework dependency
+    # chain, which is fragile inside the Termux JVM namespace. libjawt.so is
+    # still harvested from Termux openjdk-21-x because the NDK sysroot does not
+    # ship a JAWT stub.
     target_link_libraries(rlawt PRIVATE
         "${HARVEST}/sysroot-stubs/libjawt.so"
         EGL
         GLESv3
         nativewindow
-        android
         log)
 else()
     target_link_libraries(rlawt PRIVATE
