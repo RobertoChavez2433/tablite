@@ -105,6 +105,7 @@ typedef struct {
 	bool xsync_enabled;      /* RLAWT_PERF_XSYNC sub-flag */
 	bool gpu_timer_enabled;  /* RLAWT_PERF_GPU_TIMER sub-flag (intent) */
 	bool gpu_timer_available;/* actual availability after extension probe */
+	bool self_profile_enabled; /* BURST/DEEP-only telemetry self-cost profiler */
 
 	size_t window;           /* samples per window; clamped to 1..RLAWT_PERF_MAX_WINDOW */
 	size_t frame_idx;        /* monotonically increasing */
@@ -114,6 +115,11 @@ typedef struct {
 	Atom frame_marker_atom;   /* ordered _RLT_FRAME_SEQ_V1 property marker */
 	uint64_t marker_count_window;
 	uint64_t marker_error_count_window;
+	uint64_t telemetry_self_calls_window;
+	uint64_t telemetry_self_wall_ns_window;
+	uint64_t telemetry_self_thread_cpu_ns_window;
+	int frame_telemetry_fd;   /* run-scoped producer-to-Mesa shared page */
+	void *frame_telemetry_page;
 
 	uint64_t *swap_samples;  /* window-sized; allocated once at createGLContext */
 	uint64_t *gap_samples;

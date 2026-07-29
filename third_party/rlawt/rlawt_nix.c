@@ -26,13 +26,22 @@
 #if defined(__unix__) && !defined(RLAWT_DIRECT_SURFACE)
 
 #include "rlawt.h"
+#include "rlt_frame_telemetry.h"
 #include <jawt_md.h>
+#include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <X11/Xatom.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/time.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
 
 #define RLAWT_LOG(...) do { fprintf(stderr, "[rlawt] " __VA_ARGS__); fflush(stderr); } while (0)
 
@@ -109,6 +118,143 @@ static bool rlawt_env_flag(const char *name) {
 	const char *v = getenv(name);
 	if (!v || !*v) return false;
 	return !(v[0] == '0' && v[1] == '\0');
+}
+
+/*
+ * The completed-display-target route keeps the X11 host visible for login,
+ * then foregrounds the app-owned AHB consumer immediately before the first
+ * GLX swap. This control message is outside the measured swap interval and
+ * runs at most once per process.
+ */
+static void rlawt_frame_stream_request_surface(void) {
+	static bool requested;
+	if (requested || !rlawt_env_flag("RLAWT_FRAME_STREAM_ACTIVITY_CONTROL"))
+		return;
+
+	const char *host = getenv("RLAWT_ACTIVITY_CONTROL_HOST");
+	if (!host || !*host) host = "127.0.0.1";
+	int port = 49382;
+	const char *port_env = getenv("RLAWT_ACTIVITY_CONTROL_PORT");
+	if (port_env && *port_env) {
+		char *end = NULL;
+		long parsed = strtol(port_env, &end, 10);
+		if (end && *end == '\0' && parsed > 0 && parsed <= 65535)
+			port = (int)parsed;
+	}
+
+	int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (fd < 0) {
+		RLAWT_LOG("[rlawt-info] frame-stream surface control socket failed errno=%d\n", errno);
+		return;
+	}
+
+	struct timeval timeout = { .tv_sec = 2, .tv_usec = 0 };
+	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+	struct sockaddr_in address = {
+		.sin_family = AF_INET,
+		.sin_port = htons((uint16_t)port),
+	};
+	if (inet_pton(AF_INET, host, &address.sin_addr) != 1 ||
+	    connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+		RLAWT_LOG("[rlawt-info] frame-stream surface control connect failed host=%s port=%d errno=%d\n",
+			host, port, errno);
+		close(fd);
+		return;
+	}
+
+	static const char request[] = "START rlt-frame-stream\n";
+	char response[32] = {0};
+	ssize_t sent = send(fd, request, sizeof(request) - 1, MSG_NOSIGNAL);
+	ssize_t received = sent == (ssize_t)(sizeof(request) - 1)
+		? recv(fd, response, sizeof(response) - 1, 0)
+		: -1;
+	close(fd);
+	if (received > 0 && strncmp(response, "OK ", 3) == 0) {
+		requested = true;
+		RLAWT_LOG("[rlawt-info] frame-stream surface control ready host=%s port=%d\n",
+			host, port);
+	} else {
+		RLAWT_LOG("[rlawt-info] frame-stream surface control response failed sent=%zd received=%zd errno=%d\n",
+			sent, received, errno);
+	}
+}
+
+static uint64_t rlawt_clock_ns(clockid_t clock_id) {
+	struct timespec now;
+	if (clock_gettime(clock_id, &now) != 0) return 0;
+	return (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+}
+
+static void rlawt_self_profile_end(
+	AWTContext *ctx,
+	uint64_t wall_started_ns,
+	uint64_t cpu_started_ns
+) {
+	if (!wall_started_ns) return;
+	uint64_t wall_ended_ns = rlawt_clock_ns(CLOCK_MONOTONIC);
+	uint64_t cpu_ended_ns = rlawt_clock_ns(CLOCK_THREAD_CPUTIME_ID);
+	ctx->perf.telemetry_self_calls_window++;
+	if (wall_ended_ns >= wall_started_ns)
+		ctx->perf.telemetry_self_wall_ns_window += wall_ended_ns - wall_started_ns;
+	if (cpu_started_ns && cpu_ended_ns >= cpu_started_ns)
+		ctx->perf.telemetry_self_thread_cpu_ns_window += cpu_ended_ns - cpu_started_ns;
+}
+
+static void rlawt_frame_telemetry_open(AWTContext *ctx) {
+	const char *path = getenv("RLT_VTEST_TELEMETRY_PATH");
+	if (!path || !*path) return;
+
+	int fd = open(path, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		RLAWT_LOG("[rlawt-perf] WARN frame telemetry open failed errno=%d\n", errno);
+		return;
+	}
+
+	struct stat st;
+	int stat_result = fstat(fd, &st);
+	if (stat_result != 0 || st.st_size < (off_t)RLT_FRAME_TELEMETRY_SIZE) {
+		RLAWT_LOG("[rlawt-perf] WARN frame telemetry size invalid errno=%d size=%lld\n",
+			errno, (long long)(stat_result == 0 ? st.st_size : -1));
+		close(fd);
+		return;
+	}
+
+	struct rlt_frame_telemetry_v1 *page = mmap(
+		NULL,
+		RLT_FRAME_TELEMETRY_SIZE,
+		PROT_READ | PROT_WRITE,
+		MAP_SHARED,
+		fd,
+		0);
+	if (page == MAP_FAILED) {
+		RLAWT_LOG("[rlawt-perf] WARN frame telemetry mmap failed errno=%d\n", errno);
+		close(fd);
+		return;
+	}
+
+	page->magic = RLT_FRAME_TELEMETRY_MAGIC;
+	page->abi_version = RLT_FRAME_TELEMETRY_ABI_VERSION;
+	page->struct_size = RLT_FRAME_TELEMETRY_SIZE;
+	atomic_store_explicit(&page->active_begin_monotonic_ns, 0, memory_order_relaxed);
+	atomic_store_explicit(&page->active_producer_seq, 0, memory_order_release);
+	atomic_fetch_add_explicit(&page->generation, 1, memory_order_release);
+	ctx->perf.frame_telemetry_fd = fd;
+	ctx->perf.frame_telemetry_page = page;
+	RLAWT_LOG("[rlawt-info] frame telemetry ABI v1 enabled\n");
+}
+
+static void rlawt_frame_telemetry_begin(AWTContext *ctx, uint64_t seq, uint64_t begin_ns) {
+	struct rlt_frame_telemetry_v1 *page = ctx->perf.frame_telemetry_page;
+	if (!page) return;
+	atomic_store_explicit(&page->active_begin_monotonic_ns, begin_ns, memory_order_relaxed);
+	atomic_store_explicit(&page->active_producer_seq, seq, memory_order_release);
+}
+
+static void rlawt_frame_telemetry_end(AWTContext *ctx) {
+	struct rlt_frame_telemetry_v1 *page = ctx->perf.frame_telemetry_page;
+	if (!page) return;
+	atomic_store_explicit(&page->active_producer_seq, 0, memory_order_release);
 }
 
 static bool rlawt_gl_has_ext(const char *exts, const char *needle) {
@@ -297,11 +443,13 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_createGLContext(JNIEnv
 
 	/* ---- perf telemetry init (A1/A2/A3/A4/A5/A6/A7/A8) ----------------- */
 	/* AWTContext is calloc'd (rlawt.c Java_..._create0), so ctx->perf is zero. */
+	ctx->perf.frame_telemetry_fd = -1;
 	ctx->perf.enabled = rlawt_env_flag("RLAWT_PERF");
 	if (ctx->perf.enabled) {
 		ctx->perf.finish_enabled = rlawt_env_flag("RLAWT_PERF_FINISH");
 		ctx->perf.xsync_enabled = rlawt_env_flag("RLAWT_PERF_XSYNC");
 		ctx->perf.gpu_timer_enabled = rlawt_env_flag("RLAWT_PERF_GPU_TIMER");
+		ctx->perf.self_profile_enabled = rlawt_env_flag("RLT_TELEMETRY_SELF_PROFILE");
 
 		/* Window size */
 		size_t window = 60;
@@ -318,6 +466,7 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_createGLContext(JNIEnv
 		ctx->perf.window = window;
 		ctx->perf.frame_marker_atom =
 			XInternAtom(ctx->dpy, "_RLT_FRAME_SEQ_V1", False);
+		rlawt_frame_telemetry_open(ctx);
 
 		/* Allocate rolling buffers (once, outside the hot path). */
 		ctx->perf.swap_samples   = (uint64_t *)calloc(window, sizeof(uint64_t));
@@ -477,6 +626,16 @@ void rlawtContextFreePlatform(JNIEnv *env, AWTContext *ctx) {
 	free(ctx->perf.gpu_samples);    ctx->perf.gpu_samples = NULL;
 	free(ctx->perf.gpu_sample_frame_seq); ctx->perf.gpu_sample_frame_seq = NULL;
 	free(ctx->perf.gpu_queries);    ctx->perf.gpu_queries = NULL;
+	if (ctx->perf.frame_telemetry_page) {
+		struct rlt_frame_telemetry_v1 *page = ctx->perf.frame_telemetry_page;
+		atomic_store_explicit(&page->active_producer_seq, 0, memory_order_release);
+		munmap(page, RLT_FRAME_TELEMETRY_SIZE);
+		ctx->perf.frame_telemetry_page = NULL;
+	}
+	if (ctx->perf.frame_telemetry_fd >= 0) {
+		close(ctx->perf.frame_telemetry_fd);
+		ctx->perf.frame_telemetry_fd = -1;
+	}
 	if (ctx->perf.csv_fp) {
 		fclose(ctx->perf.csv_fp);
 		ctx->perf.csv_fp = NULL;
@@ -558,6 +717,7 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_swapBuffers(JNIEnv *en
 
 	ctx->awt.Lock(env);
 	XErrorHandler oldErrorHandler = XSetErrorHandler(rlawtXErrorHandler);
+	rlawt_frame_stream_request_surface();
 
 	/* Fast path: perf disabled — original behavior, one compare+branch overhead. */
 	if (!ctx->perf.enabled) {
@@ -572,6 +732,12 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_swapBuffers(JNIEnv *en
 	}
 
 	/* --- perf-instrumented path --------------------------------------- */
+	uint64_t telemetry_self_wall_started_ns = ctx->perf.self_profile_enabled
+		? rlawt_clock_ns(CLOCK_MONOTONIC)
+		: 0;
+	uint64_t telemetry_self_cpu_started_ns = ctx->perf.self_profile_enabled
+		? rlawt_clock_ns(CLOCK_THREAD_CPUTIME_ID)
+		: 0;
 	const size_t window = ctx->perf.window;
 	const size_t slot = ctx->perf.frame_idx % window;
 
@@ -659,12 +825,28 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_swapBuffers(JNIEnv *en
 			ctx->perf.marker_error_count_window++;
 	}
 
+	uint64_t frame_seq = (uint64_t)ctx->perf.frame_idx + 1ULL;
+	uint64_t frame_begin_ns =
+		(uint64_t)t_pre_swap.tv_sec * 1000000000ULL +
+		(uint64_t)t_pre_swap.tv_nsec;
+	rlawt_frame_telemetry_begin(ctx, frame_seq, frame_begin_ns);
+	rlawt_self_profile_end(
+		ctx,
+		telemetry_self_wall_started_ns,
+		telemetry_self_cpu_started_ns);
 	if (ctx->doubleBuffered) {
 		// TODO: handle -1
 		glXSwapBuffers(ctx->dpy, ctx->drawable);
 	} else {
 		glFinish();
 	}
+	rlawt_frame_telemetry_end(ctx);
+	telemetry_self_wall_started_ns = ctx->perf.self_profile_enabled
+		? rlawt_clock_ns(CLOCK_MONOTONIC)
+		: 0;
+	telemetry_self_cpu_started_ns = ctx->perf.self_profile_enabled
+		? rlawt_clock_ns(CLOCK_THREAD_CPUTIME_ID)
+		: 0;
 
 	clock_gettime(CLOCK_MONOTONIC, &t_post_swap);
 
@@ -790,13 +972,43 @@ JNIEXPORT void JNICALL Java_net_runelite_rlawt_AWTContext_swapBuffers(JNIEnv *en
 			(unsigned long long)producer_end_ns,
 			produced_fps);
 
-		/* Reset per-window counters. */
+		/* Reset per-window counters after the self-cost record below. */
 		ctx->perf.mkcur_count_window = 0;
-		ctx->perf.marker_count_window = 0;
-		ctx->perf.marker_error_count_window = 0;
 		ctx->perf.gpu_valid_count = 0;
 		ctx->perf.producer_interval_ns_sum = 0;
 		ctx->perf.producer_interval_count = 0;
+	}
+
+	rlawt_self_profile_end(
+		ctx,
+		telemetry_self_wall_started_ns,
+		telemetry_self_cpu_started_ns);
+	if (ctx->perf.self_profile_enabled &&
+		ctx->perf.frame_idx >= window &&
+		(ctx->perf.frame_idx % window) == 0) {
+		const char *capture_id = getenv("RLT_CAPTURE_ID");
+		const char *telemetry_mode = getenv("RLT_TELEMETRY_MODE");
+		RLAWT_LOG(
+			"RLT_TELEMETRY_COST_V1 run_id=%s mode=%s stage=rlawt_producer "
+			"outcome=measured calls=%llu measured_samples=%llu "
+			"measured_wall_ns=%llu measured_thread_cpu_ns=%llu "
+			"bytes=%llu dropped=%llu queue_high_water_mark=0 "
+			"record_emit_excluded=1\n",
+			capture_id && *capture_id ? capture_id : "unknown",
+			telemetry_mode && *telemetry_mode ? telemetry_mode : "unknown",
+			(unsigned long long)ctx->perf.telemetry_self_calls_window,
+			(unsigned long long)ctx->perf.telemetry_self_calls_window,
+			(unsigned long long)ctx->perf.telemetry_self_wall_ns_window,
+			(unsigned long long)ctx->perf.telemetry_self_thread_cpu_ns_window,
+			(unsigned long long)(ctx->perf.marker_count_window * 16ULL),
+			(unsigned long long)ctx->perf.marker_error_count_window);
+		ctx->perf.telemetry_self_calls_window = 0;
+		ctx->perf.telemetry_self_wall_ns_window = 0;
+		ctx->perf.telemetry_self_thread_cpu_ns_window = 0;
+	}
+	if (ctx->perf.frame_idx >= window && (ctx->perf.frame_idx % window) == 0) {
+		ctx->perf.marker_count_window = 0;
+		ctx->perf.marker_error_count_window = 0;
 	}
 
 	rlawtUnlockAWT(env, ctx);

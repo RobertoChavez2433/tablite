@@ -72,6 +72,10 @@ static inline socklen_t rlawt_surface_fill_abstract_addr(struct sockaddr_un *add
  * our consumer is NOT LorieView — it's a fresh SurfaceView in the host
  * activity that we configure to accept RGBA. */
 #define RLAWT_SURFACE_FORMAT_RGBA8 1u
+/* Bytes are BGRA, while the allocated AHardwareBuffer remains RGBA8. The
+ * consumer's presentation shader swaps R/B. This lets CPU-upload producers
+ * copy a VirGL display target row-for-row without a second conversion pass. */
+#define RLAWT_SURFACE_FORMAT_BGRA8 2u
 
 enum rlawt_surface_msg_type {
     /* Producer → consumer: initial connect. Producer announces requested canvas

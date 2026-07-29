@@ -1,0 +1,109 @@
+diff --git a/src/gallium/winsys/virgl/vtest/virgl_vtest_socket.c b/src/gallium/winsys/virgl/vtest/virgl_vtest_socket.c
+--- a/src/gallium/winsys/virgl/vtest/virgl_vtest_socket.c
++++ b/src/gallium/winsys/virgl/vtest/virgl_vtest_socket.c
+@@ -22,9 +22,13 @@
+  */
+ 
+ #include <sys/socket.h>
++#include <arpa/inet.h>
+ #include <errno.h>
+ #include <stdio.h>
++#include <stdint.h>
++#include <stdlib.h>
+ #include <netinet/in.h>
++#include <netinet/tcp.h>
+ #include <sys/un.h>
+ #include <unistd.h>
+ 
+@@ -198,29 +202,76 @@
+ 
+ int virgl_vtest_connect(struct virgl_vtest_winsys *vws)
+ {
+-   struct sockaddr_un un;
+    int sock, ret;
+-   const char* socket_name = os_get_option("VTEST_SOCKET_NAME");
++   int requested_version = VTEST_PROTOCOL_VERSION;
++   const char *tcp_port_option = os_get_option("VTEST_TCP_PORT");
+ 
+-   sock = socket(PF_UNIX, SOCK_STREAM, 0);
+-   if (sock < 0)
+-      return -1;
++   if (tcp_port_option && tcp_port_option[0]) {
++      char *end = NULL;
++      const unsigned long port = strtoul(tcp_port_option, &end, 10);
++      const int enabled = 1;
++      struct sockaddr_in addr = {
++         .sin_family = AF_INET,
++         .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
++      };
++
++      if (!end || *end || port == 0 || port > UINT16_MAX) {
++         fprintf(stderr, "Invalid VTEST_TCP_PORT: %s\n", tcp_port_option);
++         return -EINVAL;
++      }
++      addr.sin_port = htons((uint16_t)port);
++      sock = socket(AF_INET, SOCK_STREAM, 0);
++      if (sock < 0)
++         return -errno;
+ 
+-   memset(&un, 0, sizeof(un));
+-   un.sun_family = AF_UNIX;
+-   snprintf(un.sun_path, sizeof(un.sun_path), "%s", socket_name ?
+-      socket_name : VTEST_DEFAULT_SOCKET_NAME);
++      do {
++         ret = connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0
++            ? -errno : 0;
++      } while (ret == -EINTR);
+ 
+-   do {
+-      ret = 0;
+-      if (connect(sock, (struct sockaddr *)&un, sizeof(un)) < 0) {
++      if (!ret && setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
++                             &enabled, sizeof(enabled)) < 0)
+          ret = -errno;
+-      }
+-   } while (ret == -EINTR);
++
++      /* Protocol 2 RESOURCE_CREATE2 returns a shared-memory FD with
++       * SCM_RIGHTS, which is not available on TCP. Requesting version 1 is
++       * intentionally remapped to the legacy version-0 in-band resource
++       * path below by virgl_vtest_connect(). */
++      requested_version = 1;
++      fprintf(stderr,
++              "RLT_VTEST_TRANSPORT_V1 run_id=%s stage=vtest_transport "
++              "outcome=connected kind=tcp host=127.0.0.1 port=%lu "
++              "protocol_max=legacy_in_band\n",
++              os_get_option("RLT_CAPTURE_ID") ?
++                 os_get_option("RLT_CAPTURE_ID") : "unknown",
++              port);
++   } else {
++      const char *socket_name = os_get_option("VTEST_SOCKET_NAME");
++      struct sockaddr_un un;
++
++      sock = socket(PF_UNIX, SOCK_STREAM, 0);
++      if (sock < 0)
++         return -errno;
++
++      memset(&un, 0, sizeof(un));
++      un.sun_family = AF_UNIX;
++      snprintf(un.sun_path, sizeof(un.sun_path), "%s", socket_name ?
++         socket_name : VTEST_DEFAULT_SOCKET_NAME);
++
++      do {
++         ret = connect(sock, (struct sockaddr *)&un, sizeof(un)) < 0
++            ? -errno : 0;
++      } while (ret == -EINTR);
++   }
++
++   if (ret) {
++      close(sock);
++      return ret;
++   }
+ 
+    vws->sock_fd = sock;
+    virgl_vtest_send_init(vws);
+-   vws->protocol_version = virgl_vtest_negotiate_version(vws, VTEST_PROTOCOL_VERSION);
++   vws->protocol_version = virgl_vtest_negotiate_version(vws, requested_version);
+ 
+    /* Version 1 is deprecated. */
+    if (vws->protocol_version == 1)

@@ -1,0 +1,8 @@
+Package: mesa-rlt-frame-stream
+Version: 25.2.8-5
+Architecture: aarch64
+Maintainer: Tablite
+Depends: mesa (= 25.2.8)
+Description: Tablite frame-stream Mesa virpipe driver
+ Additive Termux-ABI-compatible driver, explicitly selected for completed-frame
+ telemetry and the gated redundant-X11-display bypass.

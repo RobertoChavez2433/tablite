@@ -14,6 +14,7 @@ import com.runelitetablet.domain.installer.PackageChecker
 import com.runelitetablet.domain.logging.Logger
 import com.runelitetablet.domain.setup.ScriptDeployer
 import com.runelitetablet.directsurface.DirectSurfaceControlServer
+import com.runelitetablet.directsurface.DirectSurfaceHostActivity
 import com.runelitetablet.presentation.PresentationBackend
 import com.runelitetablet.session.RuneLiteSessionService
 import com.runelitetablet.session.SessionState
@@ -211,8 +212,16 @@ class LaunchCoordinator(
             targetHz = targetHz
         )
         val capture = captureSession.manifest
-        val useDirectSurface = rendererBackend == com.runelitetablet.telemetry.RendererBackend.DIRECT_VIRGL_AHB ||
-            rendererBackend == com.runelitetablet.telemetry.RendererBackend.DIRECT_ZINK_AHB
+        val useDirectFrameStreamAhb =
+            rendererBackend == RendererBackend.DIRECT_VIRGL_AHB
+        val useCompositeFrameStreamAhb =
+            rendererBackend == RendererBackend.COMPOSITE_VIRGL_AHB
+        val useFrameStreamAhb =
+            useDirectFrameStreamAhb || useCompositeFrameStreamAhb
+        val useLegacyDirectSurface = rendererBackend == RendererBackend.DIRECT_ZINK_AHB
+        val useDirectSurface = useDirectFrameStreamAhb || useLegacyDirectSurface
+        val requiresEarlyPresentation =
+            useDirectSurface || useCompositeFrameStreamAhb
         logger?.state(
             "CAPTURE-START runId=${capture.runId} backend=${capture.backend} mode=${capture.telemetryMode} " +
                 "targetHz=${capture.targetHz} monotonicNs=${capture.clocks.monotonicNs} " +
@@ -220,15 +229,46 @@ class LaunchCoordinator(
             correlationId = correlationId
         )
         val presentationIntent = presentationBackend.createLaunchIntent(context)
-        if (useDirectSurface) {
+        if (useCompositeFrameStreamAhb) {
+            DirectSurfaceControlServer.ensureCompositeFrameStreamStarted(
+                context = context.applicationContext,
+                captureId = capture.runId,
+                telemetryMode = capture.telemetryMode,
+                vtestTcpPort = DirectSurfaceHostActivity.APP_VIRGL_VTEST_TCP_PORT,
+            )
+            logger?.state(
+                "launchInternal: compositeFrameStreamAhb=true — app-owned VirGL ready; " +
+                    "Xlorie owns the single presentation surface " +
+                    "vtestPort=${DirectSurfaceHostActivity.APP_VIRGL_VTEST_TCP_PORT}",
+                correlationId = correlationId
+            )
+        } else if (useDirectFrameStreamAhb) {
+            DirectSurfaceControlServer.ensureFrameStreamStarted(
+                context = context.applicationContext,
+                captureId = capture.runId,
+                telemetryMode = capture.telemetryMode,
+                vtestTcpPort = DirectSurfaceHostActivity.APP_VIRGL_VTEST_TCP_PORT,
+            )
+            logger?.state(
+                "launchInternal: frameStreamAhb=true — app-owned VirGL and first-swap surface control ready " +
+                    "vtestPort=${DirectSurfaceHostActivity.APP_VIRGL_VTEST_TCP_PORT}; " +
+                    "foregrounding ${presentationBackend.id} for login",
+                correlationId = correlationId
+            )
+        } else if (useLegacyDirectSurface) {
             DirectSurfaceControlServer.ensureStarted(context.applicationContext)
             logger?.state(
-                "launchInternal: useDirectSurface=true — direct control endpoint ${DirectSurfaceControlServer.CONTROL_ENDPOINT} ready; " +
+                "launchInternal: legacyDirectSurface=true — direct control endpoint ${DirectSurfaceControlServer.CONTROL_ENDPOINT} ready; " +
                     "foregrounding ${presentationBackend.id} for login and deferring DirectSurfaceHostActivity until rlawt createGLContext",
                 correlationId = correlationId
             )
         }
-        if (presentationIntent != null && (presentationBackend.shouldForegroundBeforeBootstrap() || useDirectSurface)) {
+        if (presentationIntent != null &&
+            (
+                presentationBackend.shouldForegroundBeforeBootstrap() ||
+                    requiresEarlyPresentation
+            )
+        ) {
             logger?.d("LAUNCH", "launchInternal: foregrounding ${presentationBackend.id} before bootstrap", correlationId = correlationId)
             orchestrator.actions?.launchIntent(presentationIntent); delay(700)
         }
@@ -263,10 +303,25 @@ class LaunchCoordinator(
             } else {
                 ""
             }
+            val frameStreamAhbEnv = if (useFrameStreamAhb) {
+                "RLT_APP_VIRGL_HOST=1 RLT_APP_VIRGL_AHB=1 " +
+                "VTEST_TCP_PORT=${DirectSurfaceHostActivity.APP_VIRGL_VTEST_TCP_PORT} " +
+                    "RLT_FRAME_STREAM_BYPASS_X11_DISPLAY=1 " +
+                    (if (useDirectFrameStreamAhb) {
+                    "RLAWT_FRAME_STREAM_ACTIVITY_CONTROL=1 " +
+                    "RLAWT_ACTIVITY_CONTROL_HOST=127.0.0.1 " +
+                    "RLAWT_ACTIVITY_CONTROL_PORT=${DirectSurfaceControlServer.CONTROL_PORT} "
+                    } else {
+                        ""
+                    })
+            } else {
+                ""
+            }
             val cmdLine = "RLT_NATIVE_TERMUX=1 RLT_UI_SCALE=$uiScale RLT_GAME_SIZE_W=$gameW RLT_GAME_SIZE_H=$gameH " +
                 "RLT_CAPTURE_ID=${capture.runId} RLT_TELEMETRY_MODE=${capture.telemetryMode} " +
                 "RLT_RENDERER_BACKEND=${capture.backend} RLT_TARGET_HZ=${capture.targetHz} " +
                 "RLT_CAPTURE_DIR=\$HOME/.rlt/captures/${capture.runId} " +
+                frameStreamAhbEnv +
                 "RLT_PERF_SAMPLE=$perfSampler RLAWT_PERF=$rlawtPerf RLAWT_PERF_WINDOW=30 $rawFrameCsv" +
                 "exec \"$scriptPath\"$envFileArg"
             logger?.state(
@@ -309,7 +364,12 @@ class LaunchCoordinator(
             commandRunner.launchBackground(commandPath = bashPath, arguments = arrayOf("-c", cmdLine))
         }
         logger?.state("launchInternal: command dispatched success=$success useNative=$useNative", correlationId = correlationId)
-        if (success && presentationIntent != null && presentationBackend.shouldWaitForReadySignal() && !useDirectSurface) {
+        if (
+            success &&
+            presentationIntent != null &&
+            presentationBackend.shouldWaitForReadySignal() &&
+            !requiresEarlyPresentation
+        ) {
             waitForDisplayReadyAndSwitch(presentationIntent)
         }
         return success
@@ -441,10 +501,12 @@ class LaunchCoordinator(
     }
 
     fun checkSession() {
-        val state = RuneLiteSessionService.sessionState.value
-        if (state is SessionState.Running || state is SessionState.Starting) {
-            context.startService(Intent(context, RuneLiteSessionService::class.java).apply { action = RuneLiteSessionService.ACTION_CHECK_SESSION })
-        }
+        // Process-local StateFlow resets to Idle when the Android app process is
+        // replaced, while the Termux-owned RuneLite process may legitimately
+        // remain alive. Always ask the production health owner to reconcile.
+        context.startService(Intent(context, RuneLiteSessionService::class.java).apply {
+            action = RuneLiteSessionService.ACTION_CHECK_SESSION
+        })
     }
 
     fun dismissHealthDialog() { _showHealthDialog.value = null }

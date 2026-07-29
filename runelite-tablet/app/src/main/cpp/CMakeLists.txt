@@ -22,7 +22,8 @@ add_library(rlawtsurface SHARED
     "${CMAKE_CURRENT_SOURCE_DIR}/rlawtsurface/rlawt_surface_consumer.c")
 
 target_include_directories(rlawtsurface PRIVATE
-    "${REPO_ROOT}/third_party/rlawt-bionic/include")
+    "${REPO_ROOT}/third_party/rlawt-bionic/include"
+    "${REPO_ROOT}/third_party/virglrenderer-1.3.0/vtest")
 
 target_compile_options(rlawtsurface PRIVATE
     -Wall

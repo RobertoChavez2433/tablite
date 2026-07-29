@@ -264,6 +264,261 @@ static uint64_t rendererNowNs(void) {
     return ((uint64_t) ts.tv_sec * 1000000000ULL) + (uint64_t) ts.tv_nsec;
 }
 
+/*
+ * Experimental completed-frame compositor input.
+ *
+ * The app-owned VirGL host and libXlorie are loaded in the same Android
+ * process. librlawtsurface resolves these default-visible entrypoints with
+ * dlsym(), registers its three AHardwareBuffers, and returns a slot to VirGL
+ * only after this renderer has fenced and submitted that frame. Keeping the
+ * pool persistent avoids per-frame EGLImage import and preserves Xlorie's
+ * normal root-window/sidebar draw plus its cursor draw in one Surface.
+ */
+#define RLT_EXTERNAL_POOL_MAX 3
+typedef void (*RltExternalReleaseCallback)(
+    void *opaque,
+    uint32_t index,
+    uint64_t frameSeq);
+
+typedef struct {
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    LorieBuffer *active[RLT_EXTERNAL_POOL_MAX];
+    LorieBuffer *pending[RLT_EXTERNAL_POOL_MAX];
+    uint32_t activeCount;
+    uint32_t pendingCount;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pendingWidth;
+    uint32_t pendingHeight;
+    bool swizzleRb;
+    bool pendingSwizzleRb;
+    char runId[97];
+    char pendingRunId[97];
+    bool poolUpdatePending;
+    bool framePending;
+    uint32_t frameIndex;
+    uint64_t frameSeq;
+    uint64_t frameReadyNs;
+    bool displayedValid;
+    uint32_t displayedIndex;
+    uint64_t displayedSeq;
+    RltExternalReleaseCallback releaseCallback;
+    void *releaseOpaque;
+    RltExternalReleaseCallback pendingReleaseCallback;
+    void *pendingReleaseOpaque;
+    uint64_t framesPresented;
+    uint64_t framesDropped;
+} RltExternalState;
+
+static RltExternalState rltExternal;
+
+static bool rltExternalHasWork(void) {
+    bool hasWork;
+    pthread_mutex_lock(&rltExternal.lock);
+    hasWork = rltExternal.poolUpdatePending || rltExternal.framePending;
+    pthread_mutex_unlock(&rltExternal.lock);
+    return hasWork;
+}
+
+static void rltExternalReleaseWrapped(LorieBuffer **buffersToRelease, uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) {
+        if (buffersToRelease[i])
+            LorieBuffer_release(buffersToRelease[i]);
+    }
+}
+
+static void rltExternalApplyPoolUpdate(void) {
+    LorieBuffer *old[RLT_EXTERNAL_POOL_MAX] = {0};
+    uint32_t oldCount = 0;
+    RltExternalReleaseCallback droppedCallback = NULL;
+    void *droppedOpaque = NULL;
+    uint32_t droppedIndex = 0;
+    uint64_t droppedSeq = 0;
+    RltExternalReleaseCallback displayedCallback = NULL;
+    void *displayedOpaque = NULL;
+    uint32_t displayedIndex = 0;
+    uint64_t displayedSeq = 0;
+
+    pthread_mutex_lock(&rltExternal.lock);
+    if (!rltExternal.poolUpdatePending) {
+        pthread_mutex_unlock(&rltExternal.lock);
+        return;
+    }
+
+    oldCount = rltExternal.activeCount;
+    memcpy(old, rltExternal.active, sizeof(old));
+    memset(rltExternal.active, 0, sizeof(rltExternal.active));
+    if (rltExternal.framePending) {
+        droppedCallback = rltExternal.releaseCallback;
+        droppedOpaque = rltExternal.releaseOpaque;
+        droppedIndex = rltExternal.frameIndex;
+        droppedSeq = rltExternal.frameSeq;
+        rltExternal.framePending = false;
+        rltExternal.framesDropped++;
+    }
+    if (rltExternal.displayedValid) {
+        displayedCallback = rltExternal.releaseCallback;
+        displayedOpaque = rltExternal.releaseOpaque;
+        displayedIndex = rltExternal.displayedIndex;
+        displayedSeq = rltExternal.displayedSeq;
+        rltExternal.displayedValid = false;
+    }
+
+    rltExternal.activeCount = rltExternal.pendingCount;
+    rltExternal.width = rltExternal.pendingWidth;
+    rltExternal.height = rltExternal.pendingHeight;
+    rltExternal.swizzleRb = rltExternal.pendingSwizzleRb;
+    memcpy(rltExternal.runId, rltExternal.pendingRunId, sizeof(rltExternal.runId));
+    rltExternal.releaseCallback = rltExternal.pendingReleaseCallback;
+    rltExternal.releaseOpaque = rltExternal.pendingReleaseOpaque;
+    for (uint32_t i = 0; i < rltExternal.pendingCount; i++) {
+        rltExternal.active[i] = rltExternal.pending[i];
+        rltExternal.pending[i] = NULL;
+    }
+    rltExternal.pendingCount = 0;
+    rltExternalReleaseWrapped(old, oldCount);
+    uint32_t attachedCount = 0;
+    for (uint32_t i = 0; i < rltExternal.activeCount; i++) {
+        if (LorieBuffer_attachToGL(rltExternal.active[i]))
+            attachedCount++;
+    }
+    rltExternal.poolUpdatePending = false;
+    pthread_cond_broadcast(&rltExternal.cond);
+    pthread_mutex_unlock(&rltExternal.lock);
+
+    if (droppedCallback)
+        droppedCallback(droppedOpaque, droppedIndex, droppedSeq);
+    if (displayedCallback)
+        displayedCallback(displayedOpaque, displayedIndex, displayedSeq);
+
+    log(
+        "RLT_XLORIE_COMPOSITE_V1 run_id=%s stage=pool outcome=%s slots=%u attached=%u width=%u height=%u swizzle_rb=%d",
+        rltExternal.runId[0] ? rltExternal.runId : "unknown",
+        !rltExternal.activeCount
+            ? "cleared"
+            : (rltExternal.activeCount == attachedCount
+                ? "attached"
+                : "attach_failed"),
+        rltExternal.activeCount,
+        attachedCount,
+        rltExternal.width,
+        rltExternal.height,
+        rltExternal.swizzleRb ? 1 : 0);
+}
+
+__attribute__((visibility("default")))
+int rlt_xlorie_external_pool_set(
+    AHardwareBuffer *const *hardwareBuffers,
+    uint32_t count,
+    uint32_t width,
+    uint32_t height,
+    uint32_t swizzleRb,
+    const char *runId,
+    RltExternalReleaseCallback releaseCallback,
+    void *releaseOpaque) {
+    LorieBuffer *wrapped[RLT_EXTERNAL_POOL_MAX] = {0};
+
+    if (!hardwareBuffers || !count || count > RLT_EXTERNAL_POOL_MAX ||
+        !width || !height || !releaseCallback)
+        return 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        if (!hardwareBuffers[i])
+            goto fail;
+        AHardwareBuffer_acquire(hardwareBuffers[i]);
+        wrapped[i] = LorieBuffer_wrapAHardwareBuffer(hardwareBuffers[i]);
+        if (!wrapped[i])
+            goto fail;
+    }
+
+    pthread_mutex_lock(&rltExternal.lock);
+    while (rltExternal.poolUpdatePending)
+        pthread_cond_wait(&rltExternal.cond, &rltExternal.lock);
+    memcpy(rltExternal.pending, wrapped, sizeof(wrapped));
+    rltExternal.pendingCount = count;
+    rltExternal.pendingWidth = width;
+    rltExternal.pendingHeight = height;
+    rltExternal.pendingSwizzleRb = swizzleRb != 0;
+    snprintf(
+        rltExternal.pendingRunId,
+        sizeof(rltExternal.pendingRunId),
+        "%s",
+        runId && *runId ? runId : "unknown");
+    rltExternal.pendingReleaseCallback = releaseCallback;
+    rltExternal.pendingReleaseOpaque = releaseOpaque;
+    rltExternal.poolUpdatePending = true;
+    pthread_cond_signal(&stateCond);
+    while (rltExternal.poolUpdatePending)
+        pthread_cond_wait(&rltExternal.cond, &rltExternal.lock);
+    bool applied = rltExternal.activeCount == count;
+    pthread_mutex_unlock(&rltExternal.lock);
+    return applied ? 1 : 0;
+
+fail:
+    rltExternalReleaseWrapped(wrapped, count);
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int rlt_xlorie_external_frame_ready(
+    uint32_t index,
+    uint64_t frameSeq,
+    uint64_t readyMonotonicNs) {
+    pthread_mutex_lock(&rltExternal.lock);
+    while (rltExternal.framePending && rltExternal.activeCount) {
+        struct timespec deadline = {0};
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_nsec += 250000000L;
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000L;
+        }
+        if (pthread_cond_timedwait(
+                &rltExternal.cond,
+                &rltExternal.lock,
+                &deadline) == ETIMEDOUT) {
+            pthread_mutex_unlock(&rltExternal.lock);
+            return 0;
+        }
+    }
+    if (!rltExternal.activeCount || index >= rltExternal.activeCount) {
+        pthread_mutex_unlock(&rltExternal.lock);
+        return 0;
+    }
+    rltExternal.frameIndex = index;
+    rltExternal.frameSeq = frameSeq;
+    rltExternal.frameReadyNs = readyMonotonicNs;
+    rltExternal.framePending = true;
+    pthread_cond_signal(&stateCond);
+    pthread_mutex_unlock(&rltExternal.lock);
+    return 1;
+}
+
+__attribute__((visibility("default")))
+void rlt_xlorie_external_pool_clear(void) {
+    pthread_mutex_lock(&rltExternal.lock);
+    while (rltExternal.poolUpdatePending)
+        pthread_cond_wait(&rltExternal.cond, &rltExternal.lock);
+    memset(rltExternal.pending, 0, sizeof(rltExternal.pending));
+    rltExternal.pendingCount = 0;
+    rltExternal.pendingWidth = 0;
+    rltExternal.pendingHeight = 0;
+    rltExternal.pendingSwizzleRb = false;
+    snprintf(
+        rltExternal.pendingRunId,
+        sizeof(rltExternal.pendingRunId),
+        "%s",
+        rltExternal.runId[0] ? rltExternal.runId : "unknown");
+    rltExternal.pendingReleaseCallback = NULL;
+    rltExternal.pendingReleaseOpaque = NULL;
+    rltExternal.poolUpdatePending = true;
+    pthread_cond_signal(&stateCond);
+    while (rltExternal.poolUpdatePending)
+        pthread_cond_wait(&rltExternal.cond, &rltExternal.lock);
+    pthread_mutex_unlock(&rltExternal.lock);
+}
+
 static bool rendererHasEglExtension(const char *extensions, const char *name) {
     if (!extensions || !name || !*name || strchr(name, ' '))
         return false;
@@ -1062,6 +1317,8 @@ void rendererInit(JNIEnv* env) {
     pthread_cond_init(&stateCond, NULL);
     pthread_cond_init(&stateChangeFinishCond, NULL);
     pthread_spin_init(&bufferLock, false);
+    pthread_mutex_init(&rltExternal.lock, NULL);
+    pthread_cond_init(&rltExternal.cond, NULL);
 
     pthread_create(&t, NULL, (void*(*)(void*)) rendererInitThread, NULL);
 }
@@ -1393,8 +1650,15 @@ static void drawCursor(float displayWidth, float displayHeight);
 void rendererRedrawLocked(bool* waitingForBuffers) {
     float xfactor = 1.f;
     LorieBuffer_Desc *desc = NULL;
+    LorieBuffer *externalBuffer = NULL;
     EGLSync fence;
     uint64_t frameStartNs = rendererNowNs();
+    uint64_t rootDrawStartNs;
+    uint64_t rootDrawNs;
+    uint64_t externalDrawStartNs;
+    uint64_t externalDrawNs = 0;
+    uint64_t cursorDrawStartNs;
+    uint64_t cursorDrawNs;
     uint64_t lockStartNs;
     uint64_t fenceStartNs;
     uint64_t swapStartNs;
@@ -1419,6 +1683,16 @@ void rendererRedrawLocked(bool* waitingForBuffers) {
     bool contentRequested;
     bool cursorMoved;
     bool cursorUpdated;
+    bool externalFrame = false;
+    bool externalNewFrame = false;
+    bool externalSwizzleRb = false;
+    uint32_t externalIndex = 0;
+    uint32_t externalWidth = 0;
+    uint32_t externalHeight = 0;
+    uint64_t externalFrameSeq = 0;
+    uint64_t externalReadyNs = 0;
+    RltExternalReleaseCallback externalReleaseCallback = NULL;
+    void *externalReleaseOpaque = NULL;
     // The buffer will not be released until this function ends, but main thread can modify buffer list
     pthread_spin_lock(&bufferLock);
     LorieBuffer *buffer = LorieBufferList_findById(&buffers, state->rootWindowTextureID);
@@ -1468,13 +1742,102 @@ void rendererRedrawLocked(bool* waitingForBuffers) {
         damageToRedrawNs = frameStartNs - damageMonotonicNs;
     state->drawRequested = FALSE;
 
+    pthread_mutex_lock(&rltExternal.lock);
+    if (rltExternal.framePending &&
+        rltExternal.frameIndex < rltExternal.activeCount) {
+        externalFrame = true;
+        externalNewFrame = true;
+        externalIndex = rltExternal.frameIndex;
+        externalFrameSeq = rltExternal.frameSeq;
+        externalReadyNs = rltExternal.frameReadyNs;
+        externalWidth = rltExternal.width;
+        externalHeight = rltExternal.height;
+        externalSwizzleRb = rltExternal.swizzleRb;
+        externalBuffer = rltExternal.active[externalIndex];
+        externalReleaseCallback = rltExternal.releaseCallback;
+        externalReleaseOpaque = rltExternal.releaseOpaque;
+    } else if (rltExternal.displayedValid &&
+        rltExternal.displayedIndex < rltExternal.activeCount) {
+        externalFrame = true;
+        externalIndex = rltExternal.displayedIndex;
+        externalFrameSeq = rltExternal.displayedSeq;
+        externalWidth = rltExternal.width;
+        externalHeight = rltExternal.height;
+        externalSwizzleRb = rltExternal.swizzleRb;
+        externalBuffer = rltExternal.active[externalIndex];
+    }
+    pthread_mutex_unlock(&rltExternal.lock);
+
+    rootDrawStartNs = rendererNowNs();
     LorieBuffer_bindTexture(buffer);
     if (desc->type == LORIEBUFFER_FD)
         xfactor = (float) desc->width/(float) desc->stride;
     draw(0, -1.f, -1.f, 1.f, 1.f, xfactor, LorieBuffer_isRgba(buffer));
+    rootDrawNs = rendererNowNs() - rootDrawStartNs;
+
+    if (externalFrame && externalBuffer) {
+        float rootWidth = (float) desc->width;
+        float rootHeight = (float) desc->height;
+        float canvasWidth = (float) externalWidth;
+        float canvasHeight = (float) externalHeight;
+        float canvasX = 0.f;
+        float canvasY = (rootHeight - canvasHeight) * 0.5f;
+        float x0 = -1.f + 2.f * canvasX / rootWidth;
+        float y0 = -1.f + 2.f * canvasY / rootHeight;
+        float x1 = x0 + 2.f * canvasWidth / rootWidth;
+        float y1 = y0 + 2.f * canvasHeight / rootHeight;
+
+        externalDrawStartNs = rendererNowNs();
+        LorieBuffer_bindTexture(externalBuffer);
+        draw(0, x0, y0, x1, y1, 1.f, externalSwizzleRb);
+        externalDrawNs = rendererNowNs() - externalDrawStartNs;
+        if (externalFrameSeq <= 3) {
+            uint32_t nonzeroRgb = 0;
+            uint32_t opaque = 0;
+            uint8_t maxRgb = 0;
+            const uint32_t grid = 3;
+            for (uint32_t gy = 0; gy < grid; gy++) {
+                GLint sampleY = (GLint)(
+                    canvasY + ((2u * gy + 1u) * externalHeight) /
+                        (2u * grid));
+                for (uint32_t gx = 0; gx < grid; gx++) {
+                    GLint sampleX = (GLint)(
+                        canvasX + ((2u * gx + 1u) * externalWidth) /
+                            (2u * grid));
+                    uint8_t pixel[4] = {0};
+                    glReadPixels(
+                        sampleX,
+                        sampleY,
+                        1,
+                        1,
+                        GL_RGBA,
+                        GL_UNSIGNED_BYTE,
+                        pixel);
+                    uint8_t rgbMax =
+                        pixel[0] > pixel[1] ? pixel[0] : pixel[1];
+                    if (pixel[2] > rgbMax) rgbMax = pixel[2];
+                    if (rgbMax != 0) nonzeroRgb++;
+                    if (pixel[3] == 255u) opaque++;
+                    if (rgbMax > maxRgb) maxRgb = rgbMax;
+                }
+            }
+            log(
+                "RLT_XLORIE_COMPOSITE_V1 run_id=%s stage=gl_content_probe "
+                "outcome=sampled frame_seq=%" PRIu64
+                " samples=%u nonzero_rgb=%u opaque=%u max_rgb=%u gl_error=0x%x",
+                rltExternal.runId[0] ? rltExternal.runId : "unknown",
+                externalFrameSeq,
+                grid * grid,
+                nonzeroRgb,
+                opaque,
+                maxRgb,
+                glGetError());
+        }
+    }
     fence = eglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, NULL);
     glFlush();
 
+    cursorDrawStartNs = rendererNowNs();
     if (state->cursor.updated) {
         log("Xlorie: updating cursor\n");
         lorie_mutex_lock(&state->cursor.lock, &state->cursor.lockingPid);
@@ -1487,6 +1850,7 @@ void rendererRedrawLocked(bool* waitingForBuffers) {
     state->cursor.moved = FALSE;
     drawCursor((float) (LorieBuffer_getWidth(buffer)), (float) (LorieBuffer_getHeight(buffer)));
     glFlush();
+    cursorDrawNs = rendererNowNs() - cursorDrawStartNs;
 
     // Wait until root window drawing is finished before giving control back to X server.
     // Upstream fix d69385b9 (2026-04-20): pass EGL_SYNC_FLUSH_COMMANDS_BIT_KHR so any
@@ -1516,6 +1880,72 @@ void rendererRedrawLocked(bool* waitingForBuffers) {
         platformFrameIdValid,
         platformFrameId);
 
+    if (externalNewFrame) {
+        uint64_t releaseStartNs = rendererNowNs();
+        bool promotedFrame = false;
+        bool releasePrevious = false;
+        uint32_t previousIndex = 0;
+        uint64_t previousSeq = 0;
+        pthread_mutex_lock(&rltExternal.lock);
+        if (rltExternal.framePending &&
+            rltExternal.frameIndex == externalIndex &&
+            rltExternal.frameSeq == externalFrameSeq) {
+            releasePrevious = rltExternal.displayedValid;
+            previousIndex = rltExternal.displayedIndex;
+            previousSeq = rltExternal.displayedSeq;
+            rltExternal.displayedValid = true;
+            rltExternal.displayedIndex = externalIndex;
+            rltExternal.displayedSeq = externalFrameSeq;
+            rltExternal.framePending = false;
+            rltExternal.framesPresented++;
+            promotedFrame = true;
+            pthread_cond_broadcast(&rltExternal.cond);
+        }
+        uint64_t externalPresented = rltExternal.framesPresented;
+        uint64_t externalDropped = rltExternal.framesDropped;
+        pthread_mutex_unlock(&rltExternal.lock);
+        if (promotedFrame && releasePrevious && externalReleaseCallback)
+            externalReleaseCallback(
+                externalReleaseOpaque,
+                previousIndex,
+                previousSeq);
+        uint64_t releaseNs = rendererNowNs() - releaseStartNs;
+        if (externalPresented <= 5 || (externalPresented % 60) == 0) {
+            uint64_t nowNs = rendererNowNs();
+            uint64_t queueWaitNs =
+                externalReadyNs && frameStartNs >= externalReadyNs
+                    ? frameStartNs - externalReadyNs
+                    : 0;
+            log(
+                "RLT_XLORIE_COMPOSITE_V1 run_id=%s stage=frame outcome=%s frame_seq=%" PRIu64
+                " slot=%u root=%dx%d canvas=%ux%u canvas_x=0 canvas_y=%d"
+                " queue_wait_ns=%" PRIu64 " root_draw_ns=%" PRIu64
+                " external_draw_ns=%" PRIu64 " cursor_draw_ns=%" PRIu64
+                " fence_ns=%" PRIu64 " swap_ns=%" PRIu64
+                " release_ns=%" PRIu64 " total_ns=%" PRIu64
+                " frames_presented=%" PRIu64 " frames_dropped=%" PRIu64,
+                rltExternal.runId[0] ? rltExternal.runId : "unknown",
+                swapSucceeded ? "presented" : "swap_failed",
+                externalFrameSeq,
+                externalIndex,
+                desc->width,
+                desc->height,
+                externalWidth,
+                externalHeight,
+                (desc->height - (int) externalHeight) / 2,
+                queueWaitNs,
+                rootDrawNs,
+                externalDrawNs,
+                cursorDrawNs,
+                fenceNs,
+                swapNs,
+                releaseNs,
+                nowNs - frameStartNs,
+                externalPresented,
+                externalDropped);
+        }
+    }
+
     state->renderedFrames++;
     frameEndNs = rendererNowNs();
     rendererLogRedrawPerfSample(
@@ -1542,7 +1972,7 @@ static inline __always_inline bool rendererShouldWait(bool *waitingForBuffers) {
     pthread_spin_lock(&bufferLock);
     buffersChanged = !xorg_list_is_empty(&addedBuffers) || !xorg_list_is_empty(&removedBuffers);
     pthread_spin_unlock(&bufferLock);
-    if (stateChanged || windowChanged || buffersChanged)
+    if (stateChanged || windowChanged || buffersChanged || rltExternalHasWork())
         // If there are pending changes we should process them immediately.
         return false;
 
@@ -1556,7 +1986,8 @@ static inline __always_inline bool rendererShouldWait(bool *waitingForBuffers) {
         // Even in the case if there are pending changes, we can not draw it without rendering surface
         return true;
 
-    if (state->drawRequested || state->cursor.moved || state->cursor.updated)
+    if (state->drawRequested || state->cursor.moved || state->cursor.updated ||
+        rltExternalHasWork())
         // X server reported drawing or cursor changes, no need to wait.
         return false;
 
@@ -1630,6 +2061,8 @@ __noreturn static void* rendererThread(void) {
         if (windowChanged)
             rendererRefreshContext();
 
+        rltExternalApplyPoolUpdate();
+
         // Attach all pending buffers to GL.
         pthread_spin_lock(&bufferLock);
         while((buf = LorieBufferList_first(&addedBuffers))) {
@@ -1644,7 +2077,8 @@ __noreturn static void* rendererThread(void) {
 
         if (state && state->surfaceAvailable && !state->waitForNextFrame) {
             rendererPerfStats.rendererWakeups++;
-            if (state->drawRequested || state->cursor.moved || state->cursor.updated)
+            if (state->drawRequested || state->cursor.moved ||
+                state->cursor.updated || rltExternalHasWork())
                 rendererRedrawLocked(&waitingForBuffers);
             else
                 rendererPerfStats.wakeupsWithoutRedraw++;

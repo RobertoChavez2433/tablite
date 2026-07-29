@@ -72,6 +72,23 @@ android {
         disable += "NotificationPermission"
     }
 
+    packaging {
+        jniLibs {
+            // The gated app-UID VirGL host is a packaged native executable, not a
+            // library loaded through System.loadLibrary(). Extract native payloads
+            // so ProcessBuilder can execute it from nativeLibraryDir.
+            useLegacyPackaging = true
+            // Preserve the byte-verified Termux host payloads. AGP's native-strip
+            // pass changes the async host binary's behavior before it ever opens
+            // its listener; these files are already release-built artifacts.
+            keepDebugSymbols += setOf(
+                "**/libvirgl_test_server_app.so",
+                "**/libvirglrenderer.so",
+                "**/libepoxy.so",
+            )
+        }
+    }
+
     externalNativeBuild {
         cmake {
             // Wrapper that pulls in termux-x11 and adds librlawtsurface (the

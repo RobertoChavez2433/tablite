@@ -45,21 +45,7 @@ class HybridInputController(
         lorieView.isFocusable = true
         lorieView.isFocusableInTouchMode = true
 
-        rootView.setOnTouchListener { v, event ->
-            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                v.requestUnbufferedDispatch(event)
-            }
-            handleTouchEvent(event)
-        }
-        rootView.setOnHoverListener { _, event ->
-            handleMouseMotionEvent(event)
-        }
-        rootView.setOnGenericMotionListener { _, event ->
-            handleGenericMotionEvent(event)
-        }
-        rootView.setOnCapturedPointerListener { _, event ->
-            handleCapturedPointerEvent(event)
-        }
+        bindPointerTarget(rootView)
         lorieView.setOnCapturedPointerListener { _, event ->
             handleCapturedPointerEvent(event)
         }
@@ -68,6 +54,40 @@ class HybridInputController(
         }
         rootView.requestFocus()
         lorieView.requestFocus()
+    }
+
+    /**
+     * Routes pointer events from an additional composited view through the
+     * same trackpad/mouse state machine. SurfaceViews are independent input
+     * targets, so a direct-canvas SurfaceView must be bound explicitly.
+     */
+    fun bindPointerTarget(target: View, telemetryLabel: String? = null) {
+        target.isFocusable = true
+        target.isFocusableInTouchMode = true
+        var firstInputLogged = false
+        target.setOnTouchListener { v, event ->
+            if (!firstInputLogged && telemetryLabel != null) {
+                firstInputLogged = true
+                AppLog.i(
+                    "HYBRID_INPUT",
+                    "RLT_DIRECT_INPUT_V1 stage=pointer_dispatch outcome=received " +
+                        "target=$telemetryLabel source=${event.source} action=${event.actionMasked}",
+                )
+            }
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                v.requestUnbufferedDispatch(event)
+            }
+            handleTouchEvent(event)
+        }
+        target.setOnHoverListener { _, event ->
+            handleMouseMotionEvent(event)
+        }
+        target.setOnGenericMotionListener { _, event ->
+            handleGenericMotionEvent(event)
+        }
+        target.setOnCapturedPointerListener { _, event ->
+            handleCapturedPointerEvent(event)
+        }
     }
 
     fun onWindowMetricsChanged(surfaceWidth: Int, surfaceHeight: Int, screenWidth: Int, screenHeight: Int) {

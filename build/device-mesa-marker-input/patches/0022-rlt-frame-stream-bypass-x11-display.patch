@@ -1,0 +1,63 @@
+diff --git a/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c b/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c
+--- a/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c
++++ b/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c
+@@ -181,7 +181,7 @@ rlt_vtest_emit_window(struct rlt_vtest_telemetry_state *telemetry)
+    fprintf(stderr,
+       "RLT_MESA_VTEST_V1 run_id=%s stage=mesa_vtest outcome=measured "
+       "first_seq=%llu last_seq=%llu frame_count=%u attribution_pct=%.3f "
+-      "incomplete_frames=%llu unattributed_events=%llu "
++      "incomplete_frames=%llu unattributed_events=%llu display_policy=%s "
+       "submit_calls=%llu submit_bytes=%llu submit_us_mean=%llu submit_us_p50=%llu submit_us_p95=%llu submit_us_max=%llu "
+       "transfer_get_calls=%llu transfer_get_us_mean=%llu transfer_get_us_p50=%llu transfer_get_us_p95=%llu transfer_get_us_max=%llu "
+       "completion_wait_calls=%llu completion_wait_us_mean=%llu completion_wait_us_p50=%llu completion_wait_us_p95=%llu completion_wait_us_max=%llu "
+@@ -198,6 +199,8 @@ rlt_vtest_emit_window(struct rlt_vtest_telemetry_state *telemetry)
+       attribution_pct,
+       (unsigned long long)telemetry->incomplete_frames,
+       (unsigned long long)telemetry->unattributed_events,
++      telemetry->bypass_x11_display
++         ? "bypassed_frame_stream" : "x11",
+       (unsigned long long)telemetry->stage_calls[RLT_VTEST_SUBMIT],
+       (unsigned long long)telemetry->stage_bytes[RLT_VTEST_SUBMIT],
+       (unsigned long long)stats[RLT_VTEST_SUBMIT].mean_us,
+@@ -348,9 +351,12 @@ rlt_vtest_telemetry_init(struct virgl_vtest_winsys *vtws)
+    struct rlt_vtest_telemetry_state *telemetry = &vtws->rlt_telemetry;
+    telemetry->fd = -1;
+    const char *path = getenv("RLT_VTEST_TELEMETRY_PATH");
++   const char *bypass_x11 = getenv("RLT_FRAME_STREAM_BYPASS_X11_DISPLAY");
+    const char *self_profile = getenv("RLT_TELEMETRY_SELF_PROFILE");
+    telemetry->self_profile_enabled = self_profile && *self_profile &&
+       !(self_profile[0] == '0' && self_profile[1] == '\0');
++   telemetry->bypass_x11_display =
++      bypass_x11 && strcmp(bypass_x11, "1") == 0;
+    if (!path || !*path)
+       return;
+ 
+@@ -1085,10 +1090,13 @@ static void virgl_vtest_flush_frontbuffer(struct virgl_winsys *vws,
+    virgl_vtest_transfer_get_internal(vws, res, &box, res->stride, 0, offset,
+                                      level, true);
+ 
+-   struct rlt_vtest_span display_span = rlt_vtest_span_begin(vtws);
+-   vtws->sws->displaytarget_display(vtws->sws, res->dt, winsys_drawable_handle,
+-                                    !!sub_box, sub_box);
+-   rlt_vtest_span_end(vtws, RLT_VTEST_DISPLAY, display_span, 0);
++   if (!vtws->rlt_telemetry.bypass_x11_display) {
++      struct rlt_vtest_span display_span = rlt_vtest_span_begin(vtws);
++      vtws->sws->displaytarget_display(vtws->sws, res->dt,
++                                       winsys_drawable_handle,
++                                       !!sub_box, sub_box);
++      rlt_vtest_span_end(vtws, RLT_VTEST_DISPLAY, display_span, 0);
++   }
+    rlt_vtest_complete_frame(vtws);
+ }
+ 
+diff --git a/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.h b/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.h
+--- a/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.h
++++ b/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.h
+@@ -44,6 +44,7 @@ struct sw_displaytarget;
+ 
+ struct rlt_vtest_telemetry_state {
+    bool enabled;
++   bool bypass_x11_display;
+    bool self_profile_enabled;
+    int fd;
+    const struct rlt_frame_telemetry_v1 *page;

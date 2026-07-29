@@ -1,0 +1,118 @@
+diff --git a/src/gallium/winsys/virgl/vtest/virgl_vtest_socket.c b/src/gallium/winsys/virgl/vtest/virgl_vtest_socket.c
+--- a/src/gallium/winsys/virgl/vtest/virgl_vtest_socket.c
++++ b/src/gallium/winsys/virgl/vtest/virgl_vtest_socket.c
+@@ -565,6 +565,18 @@
+                                         level, box, data_size, offset);
+ }
+ 
++int virgl_vtest_send_transfer_get_direct(struct virgl_vtest_winsys *vws,
++                                         uint32_t handle,
++                                         uint32_t level, uint32_t stride,
++                                         uint32_t layer_stride,
++                                         const struct pipe_box *box,
++                                         uint32_t data_size)
++{
++   return virgl_vtest_send_transfer_cmd(
++      vws, VCMD_RLT_TRANSFER_GET_DIRECT, handle,
++      level, stride, layer_stride, box, data_size);
++}
++
+ int virgl_vtest_send_transfer_put(struct virgl_vtest_winsys *vws,
+                                   uint32_t handle,
+                                   uint32_t level, uint32_t stride,
+diff --git a/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c b/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c
+--- a/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c
++++ b/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c
+@@ -185,6 +185,7 @@
+       "RLT_MESA_VTEST_V1 run_id=%s stage=mesa_vtest outcome=measured "
+       "first_seq=%llu last_seq=%llu frame_count=%u attribution_pct=%.3f "
+       "incomplete_frames=%llu unattributed_events=%llu display_policy=%s "
++      "transfer_policy=%s "
+       "submit_calls=%llu submit_bytes=%llu submit_us_mean=%llu submit_us_p50=%llu submit_us_p95=%llu submit_us_max=%llu "
+       "transfer_get_calls=%llu transfer_get_us_mean=%llu transfer_get_us_p50=%llu transfer_get_us_p95=%llu transfer_get_us_max=%llu "
+       "completion_wait_calls=%llu completion_wait_us_mean=%llu completion_wait_us_p50=%llu completion_wait_us_p95=%llu completion_wait_us_max=%llu "
+@@ -200,6 +201,8 @@
+       (unsigned long long)telemetry->unattributed_events,
+       telemetry->bypass_x11_display
+          ? "bypassed_frame_stream" : "x11",
++      telemetry->bypass_x11_display
++         ? "host_present_no_guest_payload" : "guest_payload",
+       (unsigned long long)telemetry->stage_calls[RLT_VTEST_SUBMIT],
+       (unsigned long long)telemetry->stage_bytes[RLT_VTEST_SUBMIT],
+       (unsigned long long)stats[RLT_VTEST_SUBMIT].mean_us,
+@@ -563,13 +566,20 @@
+    uint32_t size;
+    void *ptr;
+    uint32_t valid_stride;
++   const bool direct_host_present =
++      flush_front_buffer && vtws->rlt_telemetry.bypass_x11_display;
+ 
+    size = vtest_get_transfer_size(res, box, stride, layer_stride, level,
+                                   &valid_stride);
+    struct rlt_vtest_span transfer_span = rlt_vtest_span_begin(vtws);
+-   virgl_vtest_send_transfer_get(vtws, res->res_handle,
+-                                 level, stride, layer_stride,
+-                                 box, size, buf_offset);
++   if (direct_host_present && vtws->protocol_version < 2) {
++      virgl_vtest_send_transfer_get_direct(
++         vtws, res->res_handle, level, stride, layer_stride, box, size);
++   } else {
++      virgl_vtest_send_transfer_get(vtws, res->res_handle,
++                                    level, stride, layer_stride,
++                                    box, size, buf_offset);
++   }
+    rlt_vtest_span_end(vtws, RLT_VTEST_TRANSFER_GET, transfer_span, 0);
+ 
+    if (flush_front_buffer || vtws->protocol_version >= 2) {
+@@ -579,7 +589,7 @@
+    }
+ 
+    if (vtws->protocol_version >= 2) {
+-      if (flush_front_buffer) {
++      if (flush_front_buffer && !direct_host_present) {
+          if (box->depth > 1 || box->z > 1) {
+             fprintf(stderr, "Expected a 2D resource, received a 3D resource\n");
+             return -1;
+@@ -606,7 +616,7 @@
+          virgl_vtest_resource_unmap(vws, res);
+          vtws->sws->displaytarget_unmap(vtws->sws, res->dt);
+       }
+-   } else {
++   } else if (!direct_host_present) {
+       ptr = virgl_vtest_resource_map(vws, res);
+       virgl_vtest_recv_transfer_get_data(vtws, ptr + buf_offset, size,
+                                          valid_stride, box, res->format);
+diff --git a/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.h b/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.h
+--- a/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.h
++++ b/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.h
+@@ -170,6 +170,12 @@
+                                   const struct pipe_box *box,
+                                   uint32_t data_size,
+                                   uint32_t offset);
++int virgl_vtest_send_transfer_get_direct(struct virgl_vtest_winsys *vws,
++                                         uint32_t handle,
++                                         uint32_t level, uint32_t stride,
++                                         uint32_t layer_stride,
++                                         const struct pipe_box *box,
++                                         uint32_t data_size);
+ 
+ int virgl_vtest_send_transfer_put(struct virgl_vtest_winsys *vws,
+                                   uint32_t handle,
+diff --git a/src/virtio/vtest/vtest_protocol.h b/src/virtio/vtest/vtest_protocol.h
+--- a/src/virtio/vtest/vtest_protocol.h
++++ b/src/virtio/vtest/vtest_protocol.h
+@@ -94,6 +94,7 @@
+ #define VCMD_DRM_SYNC_TRANSFER 37
+ #define VCMD_RESOURCE_EXPORT_FD 38
+ #define VCMD_RLT_FRAME_MARKER 39
++#define VCMD_RLT_TRANSFER_GET_DIRECT 40
+ 
+ #define VCMD_RES_CREATE_SIZE 10
+ #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
+@@ -356,4 +357,6 @@
+ #define VCMD_RLT_FRAME_MARKER_BEGIN_NS_LO 2
+ #define VCMD_RLT_FRAME_MARKER_BEGIN_NS_HI 3
+ 
++#define VCMD_RLT_TRANSFER_GET_DIRECT_SIZE VCMD_TRANSFER_SIZE
++
+ #endif /* VTEST_PROTOCOL */

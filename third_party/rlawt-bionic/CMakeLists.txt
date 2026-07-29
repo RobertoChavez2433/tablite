@@ -24,6 +24,8 @@ set(RLAWT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../rlawt")
 set(HARVEST "${CMAKE_CURRENT_SOURCE_DIR}/harvest")
 set(GENERATED "${CMAKE_CURRENT_SOURCE_DIR}/generated")
 set(RLAWT_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+set(RLT_TELEMETRY_INCLUDE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../termux-packages/packages/mesa")
 
 # Sanity: harvest paths shared by both backends must resolve.
 set(_REQUIRED_HARVEST
@@ -83,6 +85,7 @@ target_include_directories(rlawt PRIVATE
     "${HARVEST}/jdk-include"
     "${HARVEST}/jdk-include/linux"
     "${RLAWT_INCLUDE}"
+    "${RLT_TELEMETRY_INCLUDE}"
     # JAWT's jawt_md.h transitively includes <X11/Xlib.h> even on the direct
     # surface path; keep X11 headers visible so jawt parses, but only LINK
     # against X11 in the GLX/X11 variant below.

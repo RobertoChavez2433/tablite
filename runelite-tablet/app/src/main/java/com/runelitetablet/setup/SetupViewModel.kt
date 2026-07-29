@@ -13,6 +13,7 @@ import com.runelitetablet.domain.logging.Logger
 import com.runelitetablet.domain.setup.SetupStateStore
 import com.runelitetablet.presentation.PresentationBackend
 import com.runelitetablet.presentation.PresentationBackends
+import com.runelitetablet.logging.AgentStateRegistry
 import com.runelitetablet.session.RuneLiteSessionService
 import com.runelitetablet.session.SessionState
 import kotlinx.coroutines.CoroutineDispatcher
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -65,6 +67,29 @@ class SetupViewModel(
 
     private val setupStarted = AtomicBoolean(false)
     private val isRetrying = AtomicBoolean(false)
+
+    init {
+        viewModelScope.launch {
+            currentScreen.collect { AgentStateRegistry.updateScreen(it.agentName()) }
+        }
+        viewModelScope.launch {
+            combine(launchState, steps) { launch, setupSteps ->
+                val completed = setupSteps.count { it.status is StepStatus.Completed }
+                val failed = setupSteps.count { it.status is StepStatus.Failed }
+                val active = setupSteps.firstOrNull {
+                    it.status is StepStatus.InProgress ||
+                        it.status is StepStatus.ManualAction
+                }?.step?.id
+                AgentStateRegistry.updateSetup(
+                    launchState = launch.agentName(),
+                    completedSteps = completed,
+                    totalSteps = setupSteps.size,
+                    failedSteps = failed,
+                    activeStep = active
+                )
+            }.collect()
+        }
+    }
 
     fun getDisplayName(): String? = authCoordinator.getDisplayName()
     fun recordUiAction(message: String) = logger?.ui(message)
@@ -188,5 +213,26 @@ class SetupViewModel(
     companion object {
         const val REQUEST_TERMUX_PERMISSION = 1001
         const val REQUEST_NOTIFICATION_PERMISSION = 1002
+    }
+
+    private fun AppScreen.agentName(): String = when (this) {
+        AppScreen.Setup -> "setup"
+        AppScreen.Login -> "login"
+        is AppScreen.CharacterSelect -> "character_select"
+        AppScreen.Launch -> "launch"
+        is AppScreen.AuthError -> "auth_error"
+        AppScreen.Settings -> "settings"
+        AppScreen.LogViewer -> "log_viewer"
+    }
+
+    private fun LaunchState.agentName(): String = when (this) {
+        LaunchState.Idle -> "idle"
+        LaunchState.CheckingUpdate -> "checking_update"
+        is LaunchState.Updating -> "updating"
+        LaunchState.CheckingHealth -> "checking_health"
+        LaunchState.RefreshingTokens -> "refreshing_tokens"
+        LaunchState.ValidatingSession -> "validating_session"
+        LaunchState.Launching -> "launching"
+        is LaunchState.Failed -> "failed"
     }
 }

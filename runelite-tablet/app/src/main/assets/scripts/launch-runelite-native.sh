@@ -46,11 +46,102 @@ RLT_TARGET_HZ="${RLT_TARGET_HZ:-120}"
 RLT_RENDERER_BACKEND="${RLT_RENDERER_BACKEND:-native_x11_virgl_gpu}"
 RLT_CAPTURE_DIR="${RLT_CAPTURE_DIR:-$HOME/.rlt/captures/$RLT_CAPTURE_ID}"
 export RLT_CAPTURE_ID RLT_TELEMETRY_MODE RLT_RENDERER_BACKEND RLT_TARGET_HZ RLT_CAPTURE_DIR
+if [[ -n "${VTEST_TCP_PORT:-}" ]]; then
+    if [[ ! "$VTEST_TCP_PORT" =~ ^[0-9]+$ ]] ||
+        (( VTEST_TCP_PORT < 1 || VTEST_TCP_PORT > 65535 )); then
+        echo "ERROR: VTEST_TCP_PORT must be an integer in 1..65535" >&2
+        exit 2
+    fi
+    RLT_VTEST_TRANSPORT="tcp_loopback_legacy_in_band"
+    export VTEST_TCP_PORT
+else
+    RLT_VTEST_TRANSPORT="unix_v3"
+    unset VTEST_TCP_PORT
+fi
+export RLT_VTEST_TRANSPORT
+if [[ "${RLT_APP_VIRGL_HOST:-0}" == "1" && -z "${VTEST_TCP_PORT:-}" ]]; then
+    echo "ERROR: RLT_APP_VIRGL_HOST=1 requires VTEST_TCP_PORT" >&2
+    exit 2
+fi
+export RLT_APP_VIRGL_HOST="${RLT_APP_VIRGL_HOST:-0}"
+export RLT_APP_VIRGL_AHB="${RLT_APP_VIRGL_AHB:-0}"
+if [[ "$RLT_APP_VIRGL_AHB" == "1" && "$RLT_APP_VIRGL_HOST" != "1" ]]; then
+    echo "ERROR: RLT_APP_VIRGL_AHB=1 requires RLT_APP_VIRGL_HOST=1" >&2
+    exit 2
+fi
+if [[ -n "${RLT_FRAME_TCP_PORT:-}" || "$RLT_APP_VIRGL_AHB" == "1" ]]; then
+    if [[ -n "${RLT_FRAME_TCP_PORT:-}" ]]; then
+        if [[ ! "$RLT_FRAME_TCP_PORT" =~ ^[0-9]+$ ]] ||
+            (( RLT_FRAME_TCP_PORT < 1 || RLT_FRAME_TCP_PORT > 65535 )); then
+            echo "ERROR: RLT_FRAME_TCP_PORT must be an integer in 1..65535" >&2
+            exit 2
+        fi
+    fi
+    if [[ "$RLT_APP_VIRGL_AHB" == "1" ]]; then
+        RLT_FRAME_STREAM_TRANSPORT="unix_seqpacket_ahb_completed_display_target"
+    else
+        RLT_FRAME_STREAM_TRANSPORT="tcp_loopback_completed_display_target"
+    fi
+    RLT_FRAME_STREAM_BYPASS_X11_DISPLAY="${RLT_FRAME_STREAM_BYPASS_X11_DISPLAY:-1}"
+    if [[ "$RLT_FRAME_STREAM_BYPASS_X11_DISPLAY" == "1" ]]; then
+        RLT_FRAME_STREAM_DISPLAY_POLICY="bypassed_x11"
+    else
+        RLT_FRAME_STREAM_DISPLAY_POLICY="mirrored_x11_login_gate"
+    fi
+    RLT_FRAME_STREAM_MESA_ROOT="$PREFIX/opt/mesa-rlt-frame-stream"
+    if [[ -f "$RLT_FRAME_STREAM_MESA_ROOT/lib/dri/swrast_dri.so" &&
+          -f "$RLT_FRAME_STREAM_MESA_ROOT/lib/libgallium-25.2.8.so" ]]; then
+        export LIBGL_DRIVERS_PATH="$RLT_FRAME_STREAM_MESA_ROOT/lib/dri"
+        RLT_FRAME_STREAM_MESA_DRIVER="project_frame_stream"
+    else
+        unset LIBGL_DRIVERS_PATH
+        RLT_FRAME_STREAM_MESA_DRIVER="system_missing_project_driver"
+    fi
+    export RLT_FRAME_STREAM_BYPASS_X11_DISPLAY
+    if [[ -n "${RLT_FRAME_TCP_PORT:-}" ]]; then
+        export RLT_FRAME_TCP_PORT
+    else
+        unset RLT_FRAME_TCP_PORT
+    fi
+else
+    RLT_FRAME_STREAM_TRANSPORT="disabled"
+    RLT_FRAME_STREAM_DISPLAY_POLICY="x11"
+    RLT_FRAME_STREAM_MESA_DRIVER="system"
+    unset RLT_FRAME_TCP_PORT
+    unset RLT_FRAME_STREAM_BYPASS_X11_DISPLAY
+    unset LIBGL_DRIVERS_PATH
+fi
+export RLT_FRAME_STREAM_TRANSPORT RLT_FRAME_STREAM_DISPLAY_POLICY RLT_FRAME_STREAM_MESA_DRIVER
 case "$RLT_RENDERER_BACKEND" in
-    direct_virgl_ahb|direct_zink_ahb) export RLT_DIRECT_SURFACE=1 ;;
+    # direct_virgl_ahb is the completed-display-target frame stream:
+    # standard rlawt/GLX produces into Mesa virpipe, while app-owned VirGL
+    # presents through same-UID AHardwareBuffers. Only direct_zink_ahb retains
+    # the older rlawt producer-to-consumer socket.
+    direct_zink_ahb) export RLT_DIRECT_SURFACE=1 ;;
     *) unset RLT_DIRECT_SURFACE ;;
 esac
 mkdir -p "$RLT_CAPTURE_DIR"
+
+# Versioned, run-scoped producer identity page shared by rlawt and Mesa's
+# virpipe/vtest client. Full per-stage guest/host timing is intentionally
+# BURST/DEEP-only: the external FrameTimeline overhead campaign proved that
+# enabling it in steady SUMMARY adds more than one 120 Hz interval at p95.
+# SUMMARY retains bounded producer/X11 observability; OFF remains dormant.
+# The page contains sequence/timestamp metadata only—never credentials,
+# client logs, input, or gameplay data.
+if [[ "$RLT_TELEMETRY_MODE" == "BURST" || "$RLT_TELEMETRY_MODE" == "DEEP" ]]; then
+    RLT_VTEST_TELEMETRY_PATH="$RLT_CAPTURE_DIR/rlt-frame-telemetry-v1.shm"
+    umask 077
+    truncate -s 64 "$RLT_VTEST_TELEMETRY_PATH"
+    export RLT_VTEST_TELEMETRY_PATH
+    RLT_VTEST_STAGE_TELEMETRY="enabled_burst_deep"
+    RLT_TELEMETRY_SELF_PROFILE="1"
+else
+    unset RLT_VTEST_TELEMETRY_PATH
+    RLT_VTEST_STAGE_TELEMETRY="disabled_off_summary"
+    RLT_TELEMETRY_SELF_PROFILE="0"
+fi
+export RLT_VTEST_STAGE_TELEMETRY RLT_TELEMETRY_SELF_PROFILE
 
 LOGFILE="$HOME/runelite-native.log"
 CLASSLOAD_LOG="$HOME/native-launch-classload.log"
@@ -61,8 +152,18 @@ printf '%s\n' \
     "renderer_backend=$RLT_RENDERER_BACKEND" \
     "target_hz=$RLT_TARGET_HZ" \
     "capture_dir=$RLT_CAPTURE_DIR" \
+    "vtest_transport=$RLT_VTEST_TRANSPORT" \
+    "vtest_tcp_port=${VTEST_TCP_PORT:-none}" \
+    "app_virgl_host=$RLT_APP_VIRGL_HOST" \
+    "app_virgl_ahb=$RLT_APP_VIRGL_AHB" \
+    "frame_stream_transport=$RLT_FRAME_STREAM_TRANSPORT" \
+    "frame_stream_tcp_port=${RLT_FRAME_TCP_PORT:-none}" \
+    "frame_stream_display_policy=$RLT_FRAME_STREAM_DISPLAY_POLICY" \
+    "frame_stream_mesa_driver=$RLT_FRAME_STREAM_MESA_DRIVER" \
+    "vtest_stage_telemetry=$RLT_VTEST_STAGE_TELEMETRY" \
+    "telemetry_self_profile=$RLT_TELEMETRY_SELF_PROFILE" \
     > "$RLT_CAPTURE_DIR/launcher-context.txt"
-echo "CAPTURE: id=$RLT_CAPTURE_ID mode=$RLT_TELEMETRY_MODE backend=$RLT_RENDERER_BACKEND target_hz=$RLT_TARGET_HZ dir=$RLT_CAPTURE_DIR" | tee -a "$LOGFILE"
+echo "CAPTURE: id=$RLT_CAPTURE_ID mode=$RLT_TELEMETRY_MODE backend=$RLT_RENDERER_BACKEND target_hz=$RLT_TARGET_HZ vtest_transport=$RLT_VTEST_TRANSPORT vtest_tcp_port=${VTEST_TCP_PORT:-none} app_virgl_host=$RLT_APP_VIRGL_HOST app_virgl_ahb=$RLT_APP_VIRGL_AHB frame_stream_transport=$RLT_FRAME_STREAM_TRANSPORT frame_stream_tcp_port=${RLT_FRAME_TCP_PORT:-none} frame_stream_display_policy=$RLT_FRAME_STREAM_DISPLAY_POLICY frame_stream_mesa_driver=$RLT_FRAME_STREAM_MESA_DRIVER vtest_stage_telemetry=$RLT_VTEST_STAGE_TELEMETRY telemetry_self_profile=$RLT_TELEMETRY_SELF_PROFILE dir=$RLT_CAPTURE_DIR" | tee -a "$LOGFILE"
 
 # Optional env-file argument (parity with launch-runelite.sh). LaunchCoordinator
 # writes Jagex auth env to $HOME/.rlt-launch-env.sh and passes its path as $1.
@@ -161,6 +262,9 @@ JAVA_BIN="$JAVA_HOME_NATIVE/bin/java"
 # Bionic dlopen does not honor -Djava.library.path for resolving NEEDED libs.
 # This is the runtime requirement from Task 21 Review Note #4.
 NATIVE_LD_LIBRARY_PATH="$JAVA_HOME_NATIVE/lib:$PREFIX/lib"
+if [[ "$RLT_FRAME_STREAM_MESA_DRIVER" == "project_frame_stream" ]]; then
+    NATIVE_LD_LIBRARY_PATH="$PREFIX/opt/mesa-rlt-frame-stream/lib:$NATIVE_LD_LIBRARY_PATH"
+fi
 
 export TERMUX_X11_BIN="$PREFIX/bin/termux-x11"
 export TERMUX_X11_PREF_BIN="$PREFIX/bin/termux-x11-preference"
@@ -180,6 +284,7 @@ AFFINITY_TIMELINE_PID=""
 THREAD_CPU_SAMPLER_PID=""
 X11_WINDOW_PROBE_PID=""
 RLAWT_RATE_TAIL_PID=""
+TELEMETRY_BRIDGE_MONITOR_PID=""
 
 # ===================================================================
 # Cleanup
@@ -235,6 +340,7 @@ cleanup_on_exit() {
     [ -n "${PERF_SAMPLER_PID:-}" ] && kill "$PERF_SAMPLER_PID" 2>/dev/null || true
     [ -n "${CPUSET_SETTLE_PID:-}" ] && kill "$CPUSET_SETTLE_PID" 2>/dev/null || true
     [ -n "${RLAWT_RATE_TAIL_PID:-}" ] && kill "$RLAWT_RATE_TAIL_PID" 2>/dev/null || true
+    [ -n "${TELEMETRY_BRIDGE_MONITOR_PID:-}" ] && kill "$TELEMETRY_BRIDGE_MONITOR_PID" 2>/dev/null || true
     [ -n "${JAVA_PID:-}" ] && kill "$JAVA_PID" 2>/dev/null || true
     [ -n "${OPENBOX_PID:-}" ] && kill "$OPENBOX_PID" 2>/dev/null || true
     [ -n "${VIRGL_PID:-}" ] && kill "$VIRGL_PID" 2>/dev/null || true
@@ -361,8 +467,11 @@ export DISPLAY=:0
 # In direct-surface mode the Android app foregrounds this before dispatching
 # us, because /system/bin/am from Termux's UID is rejected on current Android
 # builds (com.android.shell package / com.termux UID mismatch).
-if [[ "${RLT_DIRECT_SURFACE:-0}" != "1" ]]; then
+if [[ "${RLT_DIRECT_SURFACE:-0}" != "1" && -z "${RLT_FRAME_TCP_PORT:-}" &&
+      "$RLT_APP_VIRGL_AHB" != "1" ]]; then
     am start --activity-single-top --activity-clear-top -n "$X11_HOST_COMPONENT" >/dev/null 2>&1 || true
+elif [[ -n "${RLT_FRAME_TCP_PORT:-}" || "$RLT_APP_VIRGL_AHB" == "1" ]]; then
+    echo "FRAME-STREAM-DIAG DirectSurfaceHostActivity remains foreground; X11 host not foregrounded" | tee -a "$LOGFILE"
 else
     echo "DIRECT-SURFACE-DIAG Hybrid host foreground handled by app LaunchCoordinator" | tee -a "$LOGFILE"
 fi
@@ -370,7 +479,23 @@ fi
 # ===================================================================
 # Start VirGL server (Termux-native already — no change from proot path)
 # ===================================================================
-if command -v virgl_test_server_android >/dev/null 2>&1; then
+VIRGL_LOG="$HOME/virgl-server.log"
+if [[ "$RLT_APP_VIRGL_HOST" == "1" ]]; then
+    # Android filters /proc/net/tcp by app UID, so Termux cannot observe the
+    # Tablite-owned listener without consuming VirGL's single client socket.
+    # The app starts the host before this launcher is dispatched; Mesa's vtest
+    # connection is the authoritative fail-closed transport gate.
+    sleep 1
+    echo "APP-VIRGL: using app-owned host at 127.0.0.1:$VTEST_TCP_PORT" | tee -a "$LOGFILE"
+    export GALLIUM_DRIVER=virpipe
+    unset VTEST_SOCKET_NAME
+    export MESA_NO_ERROR=1
+    export MESA_EXTENSION_OVERRIDE=-GL_ARB_depth_clamp,-GL_EXT_depth_clamp
+    export MESA_GL_VERSION_OVERRIDE=4.3COMPAT
+    export MESA_GLSL_VERSION_OVERRIDE=430
+    export MESA_GLSL_CACHE_DISABLE=0
+    sleep 0.5
+elif command -v virgl_test_server_android >/dev/null 2>&1; then
     EXTERNAL_VIRGL_SENTINEL="$HOME/.rlt-external-virgl"
     if [ -f "$EXTERNAL_VIRGL_SENTINEL" ] && [ -S "$PREFIX/tmp/.virgl_test" ]; then
         EXISTING_VIRGL_PID=$(pgrep -f virgl_test_server_android | head -1 || true)
@@ -380,7 +505,6 @@ if command -v virgl_test_server_android >/dev/null 2>&1; then
         fi
     fi
     if [ -z "$VIRGL_PID" ]; then
-        VIRGL_LOG="$HOME/virgl-server.log"
         env -u LD_LIBRARY_PATH VIRGL_RENDERER_THREAD=1 VIRGL_RENDERER_ASYNC=1 \
             virgl_test_server_android > "$VIRGL_LOG" 2>&1 &
         VIRGL_PID=$!
@@ -453,7 +577,9 @@ else
     echo "  (none)" | tee -a "$LOGFILE"
 fi
 echo "[DIAG] VirGL server:" | tee -a "$LOGFILE"
-if [ -S "$PREFIX/tmp/.virgl_test" ]; then
+if [[ "$RLT_APP_VIRGL_HOST" == "1" ]]; then
+    echo "  app-owned TCP host 127.0.0.1:$VTEST_TCP_PORT (cross-UID /proc visibility unavailable)" | tee -a "$LOGFILE"
+elif [ -S "$PREFIX/tmp/.virgl_test" ]; then
     echo "  socket OK $(stat -c '%Y %n' "$PREFIX/tmp/.virgl_test")" | tee -a "$LOGFILE"
     pgrep -af virgl_test_server_android 2>/dev/null | sed 's/^/  pid: /' | tee -a "$LOGFILE"
     echo "  virgl-server.log (last 5):" | tee -a "$LOGFILE"
@@ -771,20 +897,79 @@ done
 echo "  cmd: $JAVA_BIN ${SAFE_JVM_ARGS[*]} -cp <classpath> $MAIN_CLASS $CLIENT_ARGS" | tee -a "$LOGFILE"
 : > "$CLASSLOAD_LOG"
 
-# Forward only the low-rate structured producer summary to the app-owned,
+# Forward only the low-rate structured producer, Mesa, and VirGL host summaries to the app-owned,
 # loopback-only ingress. Android logcat is UID-scoped and cannot reliably carry
-# Termux records into Tablite. rlawt still writes on the JVM stderr thread;
+# Termux records into Tablite. Producers still write on the JVM stderr thread;
 # this background bridge performs all cross-process socket I/O.
+bridge_process_snapshot() {
+    local root_pid="$1" pending pid child stat_line ticks=0 bytes=0 cmdline rchar
+    pending="$root_pid"
+    for _depth in 1 2 3; do
+        local next=""
+        for pid in $pending; do
+            [ -r "/proc/$pid/stat" ] || continue
+            stat_line="$(cat "/proc/$pid/stat" 2>/dev/null || true)"
+            if [ -n "$stat_line" ]; then
+                ticks=$((ticks + $(printf '%s\n' "$stat_line" | awk '{print $14 + $15}')))
+            fi
+            cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+            if [[ "$cmdline" == *socat* ]]; then
+                rchar="$(awk '/^rchar:/ {print $2}' "/proc/$pid/io" 2>/dev/null || echo 0)"
+                bytes=$((bytes + ${rchar:-0}))
+            fi
+            for child in $(cat "/proc/$pid/task/$pid/children" 2>/dev/null || true); do
+                next="$next $child"
+            done
+        done
+        pending="$next"
+        [ -z "$pending" ] && break
+    done
+    printf '%s %s\n' "$ticks" "$bytes"
+}
+
+start_telemetry_bridge_monitor() {
+    local bridge_pid="$1"
+    [ "$RLT_TELEMETRY_SELF_PROFILE" = "1" ] || return 0
+    (
+        local clock_ticks previous_ticks previous_bytes previous_ns
+        local snapshot now_ns ticks bytes delta_ticks delta_bytes wall_ns cpu_ns
+        clock_ticks="$(getconf CLK_TCK 2>/dev/null || echo 100)"
+        snapshot="$(bridge_process_snapshot "$bridge_pid")"
+        previous_ticks="${snapshot%% *}"
+        previous_bytes="${snapshot##* }"
+        previous_ns="$(date +%s%N)"
+        while kill -0 "$bridge_pid" 2>/dev/null; do
+            sleep 5
+            now_ns="$(date +%s%N)"
+            snapshot="$(bridge_process_snapshot "$bridge_pid")"
+            ticks="${snapshot%% *}"
+            bytes="${snapshot##* }"
+            delta_ticks=$((ticks >= previous_ticks ? ticks - previous_ticks : 0))
+            delta_bytes=$((bytes >= previous_bytes ? bytes - previous_bytes : 0))
+            wall_ns=$((now_ns >= previous_ns ? now_ns - previous_ns : 0))
+            cpu_ns=$((delta_ticks * 1000000000 / clock_ticks))
+            printf '%s\n' \
+                "RLT_TELEMETRY_COST_V1 run_id=$RLT_CAPTURE_ID mode=$RLT_TELEMETRY_MODE stage=native_bridge outcome=measured calls=1 measured_samples=1 measured_wall_ns=$wall_ns measured_thread_cpu_ns=$cpu_ns bytes=$delta_bytes dropped=0 queue_high_water_mark=0 dropped_status=unobservable queue_status=unobservable observer=procfs record_emit_excluded=1" \
+                >> "$LOGFILE"
+            previous_ticks="$ticks"
+            previous_bytes="$bytes"
+            previous_ns="$now_ns"
+        done
+    ) &
+    TELEMETRY_BRIDGE_MONITOR_PID=$!
+}
+
 if [ -x "$PREFIX/bin/socat" ]; then
     (
-        tail -F -n 0 "$LOGFILE" 2>/dev/null |
-            grep --line-buffered "RLT_FRAME_RATE_V1" |
+        tail -F -n 0 "$LOGFILE" "$VIRGL_LOG" 2>/dev/null |
+            grep --line-buffered -E "RLT_(FRAME_RATE|FRAME_STREAM|AHB_STREAM|AHB_GPU|DIRECT_TRANSFER|MESA_VTEST|VIRGL_HOST|VTEST_TRANSPORT|VTEST_FENCE|TELEMETRY_COST)_V1" |
             "$PREFIX/bin/socat" -u - TCP4:127.0.0.1:8100
     ) &
     RLAWT_RATE_TAIL_PID=$!
-    echo "FRAME-RATE-BRIDGE: started PID=$RLAWT_RATE_TAIL_PID source=rlawt-summary transport=loopback-tcp destination=127.0.0.1:8100" | tee -a "$LOGFILE"
+    start_telemetry_bridge_monitor "$RLAWT_RATE_TAIL_PID"
+    echo "NATIVE-TELEMETRY-BRIDGE: started PID=$RLAWT_RATE_TAIL_PID sources=rlawt,frame-stream,mesa-vtest,virgl-host,vtest-transport transport=loopback-tcp destination=127.0.0.1:8100" | tee -a "$LOGFILE"
 else
-    echo "FRAME-RATE-BRIDGE: socat unavailable; structured rates remain in $LOGFILE" | tee -a "$LOGFILE"
+    echo "NATIVE-TELEMETRY-BRIDGE: socat unavailable; structured summaries remain in $LOGFILE" | tee -a "$LOGFILE"
 fi
 
 "$JAVA_BIN" "${JVM_ARGS[@]}" -cp "$FULL_CLASSPATH" "$MAIN_CLASS" $CLIENT_ARGS >> "$LOGFILE" 2>&1 &

@@ -30,11 +30,14 @@ import com.runelitetablet.logging.AppLog
 import com.runelitetablet.logging.FdTracker
 import com.runelitetablet.logging.PerfSnapshots
 import com.runelitetablet.domain.command.CommandRunner
+import com.runelitetablet.directsurface.DirectSurfaceHostActivity
+import com.runelitetablet.directsurface.RlawtSurfaceServer
 import com.runelitetablet.perf.CpuBooster
 import com.runelitetablet.perf.PerfDashboard
 import com.runelitetablet.telemetry.FrameEventType
 import com.runelitetablet.telemetry.FrameOutcome
 import com.runelitetablet.telemetry.FrameStage
+import com.runelitetablet.telemetry.RendererBackend
 import com.runelitetablet.ui.LaunchPreferences
 import com.termux.x11.LorieView
 import kotlinx.coroutines.Job
@@ -62,6 +65,7 @@ class HybridX11HostActivity : ComponentActivity() {
     private var perfDashboard: PerfDashboard? = null
     private var cpuBooster: CpuBooster? = null
     private var commandRunner: CommandRunner? = null
+    private var compositeFrameServer: RlawtSurfaceServer? = null
     private var cpuBoostAttempted = false
     private var jankRegistration: SurfaceControl.OnJankDataListenerRegistration? = null
     private var jankRegistrationAttempts = 0
@@ -198,6 +202,7 @@ class HybridX11HostActivity : ComponentActivity() {
 
         initViews()
         ensureCaptureSession()
+        startCompositeFrameServerIfRequested()
         initAttachController()
         observeBridgeState()
         val container = (application as com.runelitetablet.RuneLiteTabletApp).container
@@ -273,6 +278,39 @@ class HybridX11HostActivity : ComponentActivity() {
             "CAPTURE-START runId=${capture.runId} backend=${capture.backend} mode=${capture.telemetryMode} " +
                 "targetHz=${capture.targetHz} source=hybrid-host"
         )
+    }
+
+    private fun startCompositeFrameServerIfRequested() {
+        val preferences = LaunchPreferences(this)
+        if (preferences.rendererBackend != RendererBackend.COMPOSITE_VIRGL_AHB) {
+            return
+        }
+        val runId = captureController.active?.manifest?.runId
+            ?.takeIf { it.isNotBlank() }
+            ?: run {
+                AppLog.e(
+                    "XlorieComposite",
+                    "Cannot start compositor frame server without an active capture run"
+                )
+                return
+            }
+        val socketName = DirectSurfaceHostActivity.frameAhbSocketName(runId)
+        compositeFrameServer = RlawtSurfaceServer.startCompositor(
+            abstractName = socketName,
+            captureId = runId,
+            cpuUpload = false,
+        )
+        if (compositeFrameServer == null) {
+            AppLog.e(
+                "XlorieComposite",
+                "Failed to start completed-frame compositor socket=@$socketName"
+            )
+        } else {
+            AppLog.i(
+                "XlorieComposite",
+                "Completed-frame compositor listening socket=@$socketName runId=$runId"
+            )
+        }
     }
 
     private fun initViews() {
@@ -469,6 +507,8 @@ class HybridX11HostActivity : ComponentActivity() {
     override fun onDestroy() {
         com.termux.x11.MainActivity.getInstance().setConnectionChangedListener(null)
         if (::sharedPrefs.isInitialized) sharedPrefs.unregisterOnSharedPreferenceChangeListener(prefListener)
+        compositeFrameServer?.stop()
+        compositeFrameServer = null
         super.onDestroy()
     }
 

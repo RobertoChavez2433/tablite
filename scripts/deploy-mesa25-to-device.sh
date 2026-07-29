@@ -2,7 +2,7 @@
 # Deploy a locally-built Mesa .deb to the test device and verify the
 # glxinfo regression fix.
 #
-# Usage: scripts/deploy-mesa25-to-device.sh [serial]
+# Usage: scripts/deploy-mesa25-to-device.sh [serial] [mesa-deb]
 #
 # Assumes:
 #   - third_party/termux-packages/output/ contains mesa_<ver>_aarch64.deb
@@ -14,16 +14,25 @@ set -euo pipefail
 SERIAL="${1:-R52X90378YB}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEBS_DIR="$REPO_ROOT/third_party/termux-packages/output"
+REQUESTED_MESA_DEB="${2:-${MESA_DEB:-}}"
 
-if [ ! -d "$DEBS_DIR" ]; then
+if [ -n "$REQUESTED_MESA_DEB" ]; then
+    MESA_DEB="$(cd "$(dirname "$REQUESTED_MESA_DEB")" && pwd)/$(basename "$REQUESTED_MESA_DEB")"
+    if [ ! -f "$MESA_DEB" ]; then
+        echo "ERROR: requested Mesa deb not found: $MESA_DEB" >&2
+        exit 1
+    fi
+elif [ ! -d "$DEBS_DIR" ]; then
     echo "ERROR: $DEBS_DIR not found — run ./scripts/run-docker.sh ./build-package.sh -a aarch64 mesa inside third_party/termux-packages first" >&2
     exit 1
-fi
-
-MESA_DEB=$(ls -1 "$DEBS_DIR"/mesa_*_aarch64.deb 2>/dev/null | head -1)
-if [ -z "$MESA_DEB" ]; then
-    echo "ERROR: no mesa_*_aarch64.deb found in $DEBS_DIR" >&2
-    exit 1
+else
+    mapfile -t MESA_DEBS < <(find "$DEBS_DIR" -maxdepth 1 -type f -name 'mesa_*_aarch64.deb' -print)
+    if [ "${#MESA_DEBS[@]}" -ne 1 ]; then
+        echo "ERROR: expected exactly one mesa_*_aarch64.deb in $DEBS_DIR, found ${#MESA_DEBS[@]}." >&2
+        echo "Pass the exact package path as the second argument." >&2
+        exit 1
+    fi
+    MESA_DEB="${MESA_DEBS[0]}"
 fi
 
 echo "Found deb: $MESA_DEB"

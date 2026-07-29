@@ -3,6 +3,7 @@ package com.runelitetablet.directsurface
 import android.content.Context
 import android.content.Intent
 import com.runelitetablet.logging.AppLog
+import com.runelitetablet.platform.process.AppVirglHost
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
@@ -34,6 +35,15 @@ object DirectSurfaceControlServer {
 
     @Volatile
     private var serverSocket: ServerSocket? = null
+    @Volatile
+    private var frameStreamConfig: FrameStreamConfig? = null
+    private var appVirglHost: AppVirglHost? = null
+
+    private data class FrameStreamConfig(
+        val captureId: String,
+        val telemetryMode: String,
+        val vtestTcpPort: Int,
+    )
 
     fun ensureStarted(context: Context) {
         if (!running.compareAndSet(false, true)) {
@@ -51,10 +61,81 @@ object DirectSurfaceControlServer {
         }
     }
 
+    @Synchronized
+    fun ensureFrameStreamStarted(
+        context: Context,
+        captureId: String,
+        telemetryMode: String,
+        vtestTcpPort: Int,
+    ) {
+        val safeCaptureId = captureId.ifBlank { "unknown" }
+        frameStreamConfig = FrameStreamConfig(
+            captureId = safeCaptureId,
+            telemetryMode = telemetryMode.ifBlank { "SUMMARY" },
+            vtestTcpPort = vtestTcpPort,
+        )
+        ensureStarted(context)
+        startAppVirgl(
+            context = context,
+            captureId = safeCaptureId,
+            telemetryMode = telemetryMode,
+            vtestTcpPort = vtestTcpPort,
+        )
+    }
+
+    /**
+     * Starts only the app-owned VirGL producer. The hybrid X11 activity owns
+     * the matching AHB listener and feeds frames into Xlorie's compositor, so
+     * no control listener or direct-surface activity is involved.
+     */
+    @Synchronized
+    fun ensureCompositeFrameStreamStarted(
+        context: Context,
+        captureId: String,
+        telemetryMode: String,
+        vtestTcpPort: Int,
+    ) {
+        val safeCaptureId = captureId.ifBlank { "unknown" }
+        frameStreamConfig = null
+        startAppVirgl(
+            context = context,
+            captureId = safeCaptureId,
+            telemetryMode = telemetryMode,
+            vtestTcpPort = vtestTcpPort,
+        )
+    }
+
+    private fun startAppVirgl(
+        context: Context,
+        captureId: String,
+        telemetryMode: String,
+        vtestTcpPort: Int,
+    ) {
+        appVirglHost?.stop()
+        appVirglHost = AppVirglHost.start(
+            context = context.applicationContext,
+            vtestTcpPort = vtestTcpPort,
+            frameTcpPort = 0,
+            frameAhbSocket = DirectSurfaceHostActivity.frameAhbSocketName(captureId),
+            ahbProbeWidth = 64,
+            ahbProbeHeight = 64,
+            ahbProbeFrames = 0,
+            captureId = captureId,
+            telemetryMode = telemetryMode,
+        )
+        if (appVirglHost == null) {
+            AppLog.e(TAG, "DirectSurfaceControlServer failed to start app-owned VirGL")
+        }
+    }
+
+    @Synchronized
     fun stop() {
         running.set(false)
         runCatching { serverSocket?.close() }
         serverSocket = null
+        appVirglHost?.stop()
+        appVirglHost = null
+        frameStreamConfig = null
         AppLog.i(TAG, "DirectSurfaceControlServer.stop $CONTROL_ENDPOINT")
     }
 
@@ -108,13 +189,24 @@ object DirectSurfaceControlServer {
                 ?: DEFAULT_SURFACE_SOCKET_NAME
 
             try {
+                val config = frameStreamConfig
                 val intent = Intent(context, DirectSurfaceHostActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
                     addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
                     putExtra(DirectSurfaceHostActivity.EXTRA_ABSTRACT_NAME, abstractName)
+                    if (config != null) {
+                        putExtra(DirectSurfaceHostActivity.EXTRA_APP_VIRGL_AHB, true)
+                        putExtra(DirectSurfaceHostActivity.EXTRA_CAPTURE_ID, config.captureId)
+                        putExtra(DirectSurfaceHostActivity.EXTRA_TELEMETRY_MODE, config.telemetryMode)
+                        putExtra(DirectSurfaceHostActivity.EXTRA_VTEST_TCP_PORT, config.vtestTcpPort)
+                    }
                 }
-                AppLog.i(TAG, "DirectSurfaceControlServer startActivity DirectSurfaceHostActivity abstractName=$abstractName")
+                AppLog.i(
+                    TAG,
+                    "DirectSurfaceControlServer startActivity DirectSurfaceHostActivity " +
+                        "abstractName=$abstractName frameStreamAhb=${config != null}"
+                )
                 context.startActivity(intent)
                 writeResponse(client, "OK started\n")
             } catch (t: Throwable) {

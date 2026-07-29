@@ -69,6 +69,7 @@
             android:name=".presentation.hybrid.HybridX11HostActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
 
         <!-- Direct-Android-surface host: bypasses LorieView/X11/virgl entirely.

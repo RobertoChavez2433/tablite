@@ -1,0 +1,62 @@
+diff --git a/src/gallium/frontends/dri/drisw.c b/src/gallium/frontends/dri/drisw.c
+--- a/src/gallium/frontends/dri/drisw.c
++++ b/src/gallium/frontends/dri/drisw.c
+@@ -50,6 +50,8 @@
+ #endif
+ 
+ DEBUG_GET_ONCE_BOOL_OPTION(swrast_no_present, "SWRAST_NO_PRESENT", false);
++DEBUG_GET_ONCE_BOOL_OPTION(rlt_frame_stream_bypass_x11_display,
++                           "RLT_FRAME_STREAM_BYPASS_X11_DISPLAY", false);
+ 
+ static inline void
+ get_drawable_info(struct dri_drawable *drawable, int *x, int *y, int *w, int *h)
+@@ -276,8 +278,15 @@ drisw_swap_buffers_with_damage(struct dri_drawable *drawable, int nrects, const
+                        drawable->msaa_textures[ST_ATTACHMENT_BACK_LEFT]);
+       }
+ 
+-      screen->base.screen->fence_finish(screen->base.screen, ctx->st->pipe,
+-                                        fence, OS_TIMEOUT_INFINITE);
++      /*
++       * The frame-stream transfer is ordered after this flush on the vtest
++       * socket and its host completion path performs the required GPU
++       * synchronization before publishing the AHardwareBuffer. Waiting here
++       * serializes the same work once more on the guest.
++       */
++      if (!debug_get_option_rlt_frame_stream_bypass_x11_display())
++         screen->base.screen->fence_finish(screen->base.screen, ctx->st->pipe,
++                                           fence, OS_TIMEOUT_INFINITE);
+       screen->base.screen->fence_reference(screen->base.screen, &fence, NULL);
+       drisw_copy_to_front(ctx->st->pipe, drawable, ptex, nrects, nrects ? stack_boxes : NULL);
+       drawable->buffer_age = 1;
+@@ -318,8 +327,9 @@ drisw_copy_sub_buffer(struct dri_drawable *drawable, int x, int y,
+ 
+       st_context_flush(ctx->st, ST_FLUSH_FRONT, &fence, NULL, NULL);
+ 
+-      screen->base.screen->fence_finish(screen->base.screen, ctx->st->pipe,
+-                                        fence, OS_TIMEOUT_INFINITE);
++      if (!debug_get_option_rlt_frame_stream_bypass_x11_display())
++         screen->base.screen->fence_finish(screen->base.screen, ctx->st->pipe,
++                                           fence, OS_TIMEOUT_INFINITE);
+       screen->base.screen->fence_reference(screen->base.screen, &fence, NULL);
+ 
+       if (drawable->stvis.samples > 1) {
+diff --git a/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c b/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c
+--- a/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c
++++ b/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c
+@@ -186,6 +186,7 @@ rlt_vtest_emit_window(struct rlt_vtest_telemetry_state *telemetry)
+       "first_seq=%llu last_seq=%llu frame_count=%u attribution_pct=%.3f "
+       "incomplete_frames=%llu unattributed_events=%llu display_policy=%s "
+       "transfer_policy=%s "
++      "precopy_fence_policy=%s "
+       "submit_calls=%llu submit_bytes=%llu submit_us_mean=%llu submit_us_p50=%llu submit_us_p95=%llu submit_us_max=%llu "
+       "transfer_get_calls=%llu transfer_get_us_mean=%llu transfer_get_us_p50=%llu transfer_get_us_p95=%llu transfer_get_us_max=%llu "
+       "completion_wait_calls=%llu completion_wait_us_mean=%llu completion_wait_us_p50=%llu completion_wait_us_p95=%llu completion_wait_us_max=%llu "
+@@ -203,6 +204,8 @@ rlt_vtest_emit_window(struct rlt_vtest_telemetry_state *telemetry)
+          ? "bypassed_frame_stream" : "x11",
+       telemetry->bypass_x11_display
+          ? "host_present_no_guest_payload" : "guest_payload",
++      telemetry->bypass_x11_display
++         ? "delegated_to_transfer_completion" : "explicit_guest_wait",
+       (unsigned long long)telemetry->stage_calls[RLT_VTEST_SUBMIT],
+       (unsigned long long)telemetry->stage_bytes[RLT_VTEST_SUBMIT],
+       (unsigned long long)stats[RLT_VTEST_SUBMIT].mean_us,
