@@ -5,6 +5,8 @@ __pycache__/
 diag-output.txt
 glxinfo-full.txt
 /perf-captures/
+/.codex-tmp/
+/build/
 /.vscode/
 /_tmp_*
 /combined-*.txt
