@@ -10,7 +10,8 @@ enum class RendererBackend(val id: Int, val envValue: String) {
     DIRECT_VIRGL_AHB(2, "direct_virgl_ahb"),
     DIRECT_ZINK_AHB(3, "direct_zink_ahb"),
     SOFTWARE_X11(4, "software_x11"),
-    PROOT_X11_VIRGL(5, "proot_x11_virgl_gpu");
+    PROOT_X11_VIRGL(5, "proot_x11_virgl_gpu"),
+    COMPOSITE_VIRGL_AHB(6, "composite_virgl_ahb");
 
     companion object {
         fun fromEnv(value: String?): RendererBackend =
@@ -161,4 +162,27 @@ data class TelemetrySummaryV1(
     val stageCounts: Map<Int, Long>,
     val outcomeCounts: Map<Int, Long>,
     val durationHistogram: List<Long>
+)
+
+@Serializable
+data class TelemetryStageCostV1(
+    val stage: String,
+    val calls: Long,
+    val measuredSamples: Long,
+    val measuredWallNs: Long,
+    val measuredThreadCpuNs: Long,
+    val estimatedWallNs: Long,
+    val estimatedThreadCpuNs: Long,
+    val bytes: Long,
+    val dropped: Long,
+    val queueHighWaterMark: Long
+)
+
+@Serializable
+data class TelemetryPipelineCostV1(
+    val schemaVersion: Int = 1,
+    val runId: String,
+    val mode: String,
+    val measurementStride: Int,
+    val stages: List<TelemetryStageCostV1>
 )

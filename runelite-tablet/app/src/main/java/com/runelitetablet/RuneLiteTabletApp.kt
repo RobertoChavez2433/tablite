@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import com.runelitetablet.di.AppContainer
 import com.runelitetablet.logging.AppLog
+import com.runelitetablet.logging.AgentStateRegistry
 import com.runelitetablet.logging.PerfSnapshots
 
 class RuneLiteTabletApp : Application() {
@@ -16,6 +17,7 @@ class RuneLiteTabletApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        AgentStateRegistry.install(this)
         container = AppContainer(this)
         AppLog.lifecycle(
             "RuneLiteTabletApp.onCreate: PID=${android.os.Process.myPid()} " +

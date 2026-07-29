@@ -1,7 +1,7 @@
 package com.runelitetablet.telemetry
 
 import android.content.Context
-import android.util.Log
+import com.runelitetablet.logging.AppLog
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.BufferedOutputStream
@@ -32,6 +32,7 @@ object TelemetryExporter {
 
         val directory = File(context.filesDir, "captures/${session.manifest.runId}")
         directory.mkdirs()
+        TelemetryCostTracker.reset()
         val newState = ExportState(directory, session)
         state = newState
         executor.execute { newState.flush() }
@@ -71,7 +72,7 @@ object TelemetryExporter {
                 writeSummary()
             } catch (error: Exception) {
                 session.recorder.recordTelemetryLoss()
-                Log.e(LOG_TAG, "Background telemetry export failed", error)
+                AppLog.e("PERF", "Background telemetry export failed", error)
             }
         }
 
@@ -83,33 +84,90 @@ object TelemetryExporter {
         }
 
         private fun writeManifest() {
+            val token = TelemetryCostTracker.begin(
+                TelemetryCostTracker.Stage.EXPORT_MANIFEST
+            )
             val file = File(directory, "app-capture-manifest-v1.json")
-            if (!file.exists()) {
-                file.writeText(json.encodeToString(session.manifest))
+            try {
+                if (!file.exists()) {
+                    val encoded = json.encodeToString(session.manifest)
+                    file.writeText(encoded)
+                    TelemetryCostTracker.addBytes(
+                        TelemetryCostTracker.Stage.EXPORT_MANIFEST,
+                        encoded.toByteArray().size.toLong()
+                    )
+                }
+            } finally {
+                TelemetryCostTracker.end(TelemetryCostTracker.Stage.EXPORT_MANIFEST, token)
             }
         }
 
         private fun writeEvents() {
-            while (true) {
-                val events = session.recorder.drain(MAX_DRAIN_BATCH)
-                if (events.isEmpty()) break
-                val stream = output ?: BufferedOutputStream(
-                    FileOutputStream(eventsFile, true),
-                    OUTPUT_BUFFER_BYTES
-                ).also { output = it }
-                events.forEach { stream.write(FrameEventBinaryCodec.encode(it)) }
-                stream.flush()
+            val token = TelemetryCostTracker.begin(TelemetryCostTracker.Stage.EXPORT_EVENTS)
+            var writtenBytes = 0L
+            try {
+                while (true) {
+                    val events = session.recorder.drain(MAX_DRAIN_BATCH)
+                    if (events.isEmpty()) break
+                    val stream = output ?: BufferedOutputStream(
+                        FileOutputStream(eventsFile, true),
+                        OUTPUT_BUFFER_BYTES
+                    ).also { output = it }
+                    events.forEach {
+                        val encoded = FrameEventBinaryCodec.encode(it)
+                        stream.write(encoded)
+                        writtenBytes += encoded.size.toLong()
+                    }
+                    stream.flush()
+                }
+            } finally {
+                TelemetryCostTracker.addBytes(
+                    TelemetryCostTracker.Stage.EXPORT_EVENTS,
+                    writtenBytes
+                )
+                TelemetryCostTracker.end(TelemetryCostTracker.Stage.EXPORT_EVENTS, token)
             }
         }
 
         private fun writeSummary() {
-            File(directory, "app-telemetry-summary-v1.json")
-                .writeText(json.encodeToString(session.recorder.snapshotSummary()))
+            val token = TelemetryCostTracker.begin(TelemetryCostTracker.Stage.EXPORT_SUMMARY)
+            try {
+                val recorderSummary = session.recorder.snapshotSummary()
+                val encodedSummary = json.encodeToString(recorderSummary)
+                File(directory, "app-telemetry-summary-v1.json").writeText(encodedSummary)
+
+                val cost = TelemetryCostTracker.snapshot(
+                    runId = session.manifest.runId,
+                    mode = session.manifest.telemetryMode
+                )
+                val recorderCost = TelemetryStageCostV1(
+                    stage = TelemetryCostTracker.Stage.FRAME_RECORDER.wireName,
+                    calls = recorderSummary.recordedEvents,
+                    measuredSamples = recorderSummary.recordedEvents,
+                    measuredWallNs = recorderSummary.telemetryCpuNs,
+                    measuredThreadCpuNs = 0,
+                    estimatedWallNs = recorderSummary.telemetryCpuNs,
+                    estimatedThreadCpuNs = 0,
+                    bytes = 0,
+                    dropped = recorderSummary.lostEvents,
+                    queueHighWaterMark = recorderSummary.queueHighWaterMark
+                )
+                val encodedCost = json.encodeToString(
+                    cost.copy(stages = listOf(recorderCost) + cost.stages)
+                )
+                File(directory, "app-telemetry-cost-v1.json").writeText(encodedCost)
+                TelemetryCostTracker.addBytes(
+                    TelemetryCostTracker.Stage.EXPORT_SUMMARY,
+                    encodedSummary.toByteArray().size.toLong() +
+                        encodedCost.toByteArray().size.toLong()
+                )
+            } finally {
+                TelemetryCostTracker.end(TelemetryCostTracker.Stage.EXPORT_SUMMARY, token)
+            }
         }
     }
 
     private const val FLUSH_INTERVAL_SECONDS = 1L
     private const val MAX_DRAIN_BATCH = 4_096
     private const val OUTPUT_BUFFER_BYTES = 256 * 1024
-    private const val LOG_TAG = "RLT-Telemetry"
 }

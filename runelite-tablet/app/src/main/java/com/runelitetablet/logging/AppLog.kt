@@ -5,6 +5,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.runelitetablet.BuildConfig
 import com.runelitetablet.domain.logging.Logger
+import com.runelitetablet.telemetry.TelemetryCostTracker
 import java.io.File
 
 object AppLog : Logger {
@@ -29,22 +30,94 @@ object AppLog : Logger {
     override fun i(tag: String, msg: String, correlationId: String?) = route("I", tag, msg, correlationId) { Log.i(TAG, it) }
     override fun w(tag: String, msg: String, correlationId: String?) = route("W", tag, msg, correlationId) { Log.w(TAG, it) }
     override fun e(tag: String, msg: String, throwable: Throwable?, correlationId: String?) {
-        val line = fmt(tag, msg, correlationId)
-        if (throwable != null) Log.e(TAG, line, throwable) else Log.e(TAG, line)
-        if (BuildConfig.DEBUG) writer(tag).write(if (throwable != null) "$line\n${trunc(throwable)}" else line)
-        emit("E", tag, msg, correlationId)
+        val safeMessage = sanitize(msg)
+        val token = TelemetryCostTracker.begin(
+            TelemetryCostTracker.Stage.LOG_ROUTE,
+            byteCount = safeMessage.length.toLong()
+        )
+        try {
+            val line = fmt(tag, safeMessage, correlationId)
+            if (throwable != null) Log.e(TAG, line, throwable) else Log.e(TAG, line)
+            if (BuildConfig.DEBUG) writer(tag).write(if (throwable != null) "$line\n${trunc(throwable)}" else line)
+            emit("E", tag, safeMessage, correlationId)
+        } finally {
+            TelemetryCostTracker.end(TelemetryCostTracker.Stage.LOG_ROUTE, token)
+        }
     }
 
     fun shell(tag: String, msg: String, cid: String? = null) {
-        val line = fmt(tag, msg, cid); Log.i(TAG, line)
-        if (BuildConfig.DEBUG) writer(tag).write(line); emit("I", tag, msg, cid, source = "shell")
+        val safeMessage = sanitize(msg)
+        val token = TelemetryCostTracker.begin(
+            TelemetryCostTracker.Stage.LOG_ROUTE,
+            byteCount = safeMessage.length.toLong()
+        )
+        try {
+            val line = fmt(tag, safeMessage, cid); Log.i(TAG, line)
+            if (BuildConfig.DEBUG) writer(tag).write(line)
+            emit("I", tag, safeMessage, cid, source = "shell")
+        } finally {
+            TelemetryCostTracker.end(TelemetryCostTracker.Stage.LOG_ROUTE, token)
+        }
+    }
+
+    /**
+     * Canonical adapter for allowlisted, cross-process native summaries.
+     *
+     * NativeTelemetryIngressServer owns the loopback transport and validation;
+     * this method makes accepted records visible through the same retained
+     * agent endpoint, file log, and Logcat path as app-owned diagnostics.
+     */
+    fun nativeIngress(component: String, msg: String, cid: String? = null) {
+        val safeComponent = component
+            .uppercase()
+            .replace(Regex("[^A-Z0-9_]+"), "_")
+            .trim('_')
+            .take(32)
+            .ifBlank { "UNCLASSIFIED" }
+        val tag = "NATIVE_$safeComponent"
+        val safeMessage = sanitize(msg)
+        val token = TelemetryCostTracker.begin(
+            TelemetryCostTracker.Stage.LOG_ROUTE,
+            byteCount = safeMessage.length.toLong()
+        )
+        try {
+            val line = fmt(tag, safeMessage, cid)
+            Log.i(TAG, line)
+            if (BuildConfig.DEBUG) writer(tag).write(line)
+            emit("I", tag, safeMessage, cid, source = "native_ingress")
+        } finally {
+            TelemetryCostTracker.end(TelemetryCostTracker.Stage.LOG_ROUTE, token)
+        }
     }
 
     private inline fun route(lvl: String, tag: String, msg: String, cid: String?, logcat: (String) -> Unit) {
-        logcat(fmt(tag, msg, cid)); if (BuildConfig.DEBUG) writer(tag).write(fmt(tag, msg, cid)); emit(lvl, tag, msg, cid)
+        val safeMessage = sanitize(msg)
+        val token = TelemetryCostTracker.begin(
+            TelemetryCostTracker.Stage.LOG_ROUTE,
+            byteCount = safeMessage.length.toLong()
+        )
+        try {
+            logcat(fmt(tag, safeMessage, cid))
+            if (BuildConfig.DEBUG) writer(tag).write(fmt(tag, safeMessage, cid))
+            emit(lvl, tag, safeMessage, cid)
+        } finally {
+            TelemetryCostTracker.end(TelemetryCostTracker.Stage.LOG_ROUTE, token)
+        }
     }
 
     private fun writer(tag: String) = if (tag in PERF_TAGS) perfWriter else fileWriter
+
+    private fun sanitize(message: String): String {
+        val token = TelemetryCostTracker.begin(
+            TelemetryCostTracker.Stage.PAYLOAD_SANITIZE,
+            byteCount = message.length.toLong()
+        )
+        return try {
+            ObservabilityPayloadSanitizer.scrubString(message)
+        } finally {
+            TelemetryCostTracker.end(TelemetryCostTracker.Stage.PAYLOAD_SANITIZE, token)
+        }
+    }
 
     private fun emit(lvl: String, tag: String, msg: String, cid: String?, source: String = "kotlin") {
         val s = debugServer ?: return; val c = Throwable().stackTrace.getOrNull(3)

@@ -2,10 +2,13 @@ package com.runelitetablet.logging
 
 import android.util.Log
 import com.runelitetablet.domain.process.LineProcessLauncher
+import com.runelitetablet.telemetry.TelemetryCostTracker
 import java.io.OutputStream
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.security.MessageDigest
+import java.time.Instant
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
@@ -22,6 +25,8 @@ import java.util.concurrent.atomic.AtomicLong
 class DebugLogServer(
     private val lineProcessLauncher: LineProcessLauncher,
     private val port: Int = DEFAULT_PORT,
+    private val diagnosticsSession: AgentDiagnosticsSession? = null,
+    stateSnapshotProvider: () -> AgentStateSnapshotV1 = AgentStateProjection::snapshot,
 ) {
     private val running = AtomicBoolean(false)
     private var serverSocket: ServerSocket? = null
@@ -33,6 +38,12 @@ class DebugLogServer(
     private val queuedFrames = AtomicInteger(0)
     private val droppedFrames = AtomicLong(0)
     private val startTimeMs = System.currentTimeMillis()
+    private val logStore = DiagnosticLogStore(
+        runId = diagnosticsSession?.runId ?: "legacy-debug-session"
+    )
+    private val statePublisher = AgentStatePublisher(stateSnapshotProvider)
+    private var lastStateObservationMs = 0L
+    private var lastStateHeartbeatMs = 0L
 
     /** Callback for bounded native telemetry summaries. Raw per-frame events never traverse logcat. */
     @Volatile var nativeLogListener: ((String) -> Unit)? = null
@@ -60,17 +71,39 @@ class DebugLogServer(
      * Actual socket writes happen on the send thread to avoid NetworkOnMainThreadException.
      */
     fun broadcast(json: String) {
-        if (clients.isEmpty()) return
-        if (queuedFrames.get() >= MAX_QUEUED_FRAMES) {
-            droppedFrames.incrementAndGet()
+        val retainToken = TelemetryCostTracker.begin(
+            TelemetryCostTracker.Stage.RETAINED_STORE,
+            byteCount = json.length.toLong()
+        )
+        val retained = try {
+            runCatching { logStore.append(json) }.getOrNull()
+        } finally {
+            TelemetryCostTracker.end(TelemetryCostTracker.Stage.RETAINED_STORE, retainToken)
+        }
+        if (retained == null) {
+            TelemetryCostTracker.recordDrop(TelemetryCostTracker.Stage.RETAINED_STORE)
             return
         }
-        sendQueue.offer(encodeWsFrame(json))
+        if (clients.isEmpty()) return
+        val queueToken = TelemetryCostTracker.begin(
+            TelemetryCostTracker.Stage.WEBSOCKET_QUEUE,
+            byteCount = retained.encodedBytes.toLong(),
+            queueDepth = queuedFrames.get().toLong()
+        )
+        if (queuedFrames.get() >= MAX_QUEUED_FRAMES) {
+            droppedFrames.incrementAndGet()
+            TelemetryCostTracker.recordDrop(TelemetryCostTracker.Stage.WEBSOCKET_QUEUE)
+            TelemetryCostTracker.end(TelemetryCostTracker.Stage.WEBSOCKET_QUEUE, queueToken)
+            return
+        }
+        sendQueue.offer(encodeWsFrame(retained.encodedJson))
         val depth = queuedFrames.incrementAndGet()
         if (depth > MAX_QUEUED_FRAMES) {
             if (sendQueue.poll() != null) queuedFrames.decrementAndGet()
             droppedFrames.incrementAndGet()
+            TelemetryCostTracker.recordDrop(TelemetryCostTracker.Stage.WEBSOCKET_QUEUE)
         }
+        TelemetryCostTracker.end(TelemetryCostTracker.Stage.WEBSOCKET_QUEUE, queueToken)
     }
 
     val isRunning: Boolean get() = running.get()
@@ -79,6 +112,7 @@ class DebugLogServer(
 
     private fun sendLoop() {
         while (running.get()) {
+            publishStateIfObserved()
             val frame = sendQueue.poll()
             if (frame == null) {
                 Thread.sleep(10) // Avoid busy spin
@@ -95,8 +129,12 @@ class DebugLogServer(
 
     private fun acceptLoop() {
         try {
-            serverSocket = ServerSocket(port).also { it.reuseAddress = true }
-            Log.i(TAG, "DebugLogServer listening on port $port")
+            serverSocket = ServerSocket(
+                port,
+                SERVER_BACKLOG,
+                InetAddress.getByName("127.0.0.1")
+            ).also { it.reuseAddress = true }
+            Log.i(TAG, "DebugLogServer listening on loopback port $port")
             while (running.get()) {
                 val socket = serverSocket!!.accept()
                 Thread({ handleConnection(socket) }, "DebugLogServer-Client").also { it.isDaemon = true; it.start() }
@@ -137,6 +175,8 @@ class DebugLogServer(
 
             if (wsKey != null && path == "/ws") {
                 upgradeToWebSocket(socket, wsKey)
+            } else if (path.substringBefore('?').startsWith("/v1/")) {
+                handleCanonicalRequest(socket, requestLine, headers)
             } else {
                 serveHtml(socket)
             }
@@ -233,13 +273,184 @@ class DebugLogServer(
         level: String, tag: String, msg: String, thread: String,
         source: String, file: String, lineNum: Int, correlationId: String?
     ): String {
+        val encodeToken = TelemetryCostTracker.begin(
+            TelemetryCostTracker.Stage.JSON_ENCODE,
+            byteCount = msg.length.toLong()
+        )
         val ts = System.currentTimeMillis()
         val elapsed = ts - startTimeMs
-        val escapedMsg = msg.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "")
-        val escapedFile = file.replace("\\", "\\\\").replace("\"", "\\\"")
-        val corrField = if (correlationId != null) "\"$correlationId\"" else "null"
-        return """{"ts":$ts,"elapsed":$elapsed,"level":"$level","tag":"$tag","msg":"$escapedMsg","thread":"$thread","correlationId":$corrField,"source":"$source","file":"$escapedFile","line":$lineNum}"""
+        val sanitizeToken = TelemetryCostTracker.begin(
+            TelemetryCostTracker.Stage.PAYLOAD_SANITIZE,
+            byteCount = msg.length.toLong()
+        )
+        val safeMessage = try {
+            ObservabilityPayloadSanitizer.scrubString(msg)
+        } finally {
+            TelemetryCostTracker.end(
+                TelemetryCostTracker.Stage.PAYLOAD_SANITIZE,
+                sanitizeToken
+            )
+        }
+        val eventClass = ObservabilityEventCatalog.eventClass(tag)
+        val corrField = correlationId?.let(::jsonString) ?: "null"
+        val captureRunId = com.runelitetablet.telemetry.CaptureSessionRegistry
+            .active?.manifest?.runId
+        return try {
+            buildString {
+                append("""{"schemaVersion":${ObservabilityEventCatalog.SCHEMA_VERSION}""")
+                append(""","runId":${jsonString(diagnosticsSession?.runId ?: "legacy-debug-session")}""")
+                append(""","captureRunId":${captureRunId?.let(::jsonString) ?: "null"}""")
+                append(""","ts":$ts,"elapsed":$elapsed""")
+                append(""","level":${jsonString(level)},"severity":${jsonString(severity(level))}""")
+                append(""","eventClass":${jsonString(eventClass)}""")
+                append(""","fingerprint":${jsonString("$eventClass.${level.lowercase()}")}""")
+                append(""","tag":${jsonString(tag)},"message":${jsonString(safeMessage)}""")
+                append(""","msg":${jsonString(safeMessage)},"thread":${jsonString(thread)}""")
+                append(""","correlationId":$corrField,"source":${jsonString(source)}""")
+                append(""","file":${jsonString(file)},"line":$lineNum}""")
+            }
+        } finally {
+            TelemetryCostTracker.end(TelemetryCostTracker.Stage.JSON_ENCODE, encodeToken)
+        }
     }
+
+    private fun publishStateIfObserved() {
+        if (statePublisher.subscriberCount == 0) return
+        val now = System.currentTimeMillis()
+        if (now - lastStateObservationMs >= STATE_OBSERVATION_INTERVAL_MS) {
+            runCatching { statePublisher.observeNow() }
+            lastStateObservationMs = now
+        }
+        if (now - lastStateHeartbeatMs >= STATE_HEARTBEAT_INTERVAL_MS) {
+            statePublisher.heartbeat()
+            lastStateHeartbeatMs = now
+        }
+    }
+
+    private fun handleCanonicalRequest(
+        socket: Socket,
+        requestLine: String,
+        headers: Map<String, String>
+    ) {
+        val session = diagnosticsSession
+        if (session == null || !session.authorize(headers["authorization"])) {
+            sendJson(socket, 403, """{"error":"run_auth_failed"}""")
+            return
+        }
+        val requestParts = requestLine.split(" ")
+        val method = requestParts.getOrNull(0) ?: ""
+        val rawTarget = requestParts.getOrNull(1) ?: ""
+        val path = rawTarget.substringBefore('?')
+        if (method != "GET") {
+            sendJson(socket, 405, """{"error":"method_not_allowed"}""")
+            return
+        }
+        when (path) {
+            "/v1/capabilities" -> sendJson(socket, 200, capabilitiesJson(session))
+            "/v1/health" -> sendJson(socket, 200, healthJson(session))
+            "/v1/state" -> {
+                val snapshot = statePublisher.observeNow()
+                sendJson(socket, 200, STATE_JSON.encodeToString(
+                    AgentStateSnapshotV1.serializer(),
+                    snapshot
+                ))
+            }
+            "/v1/state/events" -> serveStateEvents(
+                socket,
+                headers["last-event-id"]
+            )
+            "/v1/logs" -> {
+                val query = parseQuery(rawTarget)
+                val after = query["after"]?.toLongOrNull() ?: 0L
+                val limit = query["limit"]?.toIntOrNull() ?: 100
+                if (after < 0 || limit !in 1..500) {
+                    sendJson(socket, 400, """{"error":"invalid_log_query"}""")
+                } else {
+                    sendJson(socket, 200, encodeLogPage(logStore.query(after, limit)))
+                }
+            }
+            else -> sendJson(socket, 404, """{"error":"not_found"}""")
+        }
+    }
+
+    private fun serveStateEvents(socket: Socket, lastEventId: String?) {
+        val subscription = try {
+            statePublisher.subscribe(lastEventId)
+        } catch (_: IllegalStateException) {
+            sendJson(socket, 429, """{"error":"state_subscriber_limit_reached"}""")
+            return
+        }
+        try {
+            val headers =
+                "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: text/event-stream; charset=utf-8\r\n" +
+                    "Cache-Control: no-cache\r\n" +
+                    "Connection: close\r\n" +
+                    "X-Content-Type-Options: nosniff\r\n\r\n"
+            socket.getOutputStream().write(headers.toByteArray(Charsets.US_ASCII))
+            socket.getOutputStream().flush()
+            while (running.get() && !socket.isClosed && !subscription.isClosed()) {
+                val event = subscription.next(1_000) ?: continue
+                socket.getOutputStream().write(event.toByteArray(Charsets.UTF_8))
+                socket.getOutputStream().flush()
+            }
+        } finally {
+            subscription.close()
+            runCatching { socket.close() }
+        }
+    }
+
+    private fun sendJson(socket: Socket, status: Int, json: String) {
+        val body = json.toByteArray(Charsets.UTF_8)
+        val reason = when (status) {
+            200 -> "OK"
+            400 -> "Bad Request"
+            403 -> "Forbidden"
+            404 -> "Not Found"
+            405 -> "Method Not Allowed"
+            429 -> "Too Many Requests"
+            else -> "Error"
+        }
+        val response =
+            "HTTP/1.1 $status $reason\r\n" +
+                "Content-Type: application/json; charset=utf-8\r\n" +
+                "Content-Length: ${body.size}\r\n" +
+                "Cache-Control: no-store\r\n" +
+                "X-Content-Type-Options: nosniff\r\n" +
+                "Connection: close\r\n\r\n"
+        socket.getOutputStream().write(response.toByteArray(Charsets.US_ASCII))
+        socket.getOutputStream().write(body)
+        socket.getOutputStream().flush()
+        socket.close()
+    }
+
+    private fun capabilitiesJson(session: AgentDiagnosticsSession): String =
+        """{"schemaVersion":1,"runId":${jsonString(session.runId)},"protocol":"tablite-agent-diagnostics","routes":["/v1/capabilities","/v1/health","/v1/logs","/v1/state","/v1/state/events"],"stateStream":"sse","logStream":"websocket_legacy_plus_cursor","eventCatalog":${encodeStrings(ObservabilityEventCatalog.allEventClasses())},"limits":{"logPage":500,"logEntryBytes":65536,"stateSubscribers":8,"stateHistory":256}}"""
+
+    private fun healthJson(session: AgentDiagnosticsSession): String {
+        val stats = logStore.stats()
+        return """{"ok":true,"schemaVersion":1,"runId":${jsonString(session.runId)},"server":"running","stateGeneration":${jsonString(statePublisher.generation())},"clients":${clients.size},"logRetained":${stats["retainedEntries"]},"logEvicted":${stats["evictedCount"]},"logDropped":${stats["droppedCount"]},"websocketDropped":${droppedFrames.get()}}"""
+    }
+
+    private fun encodeLogPage(page: DiagnosticLogPage): String =
+        buildString {
+            append("""{"runId":${jsonString(page.runId)},"entries":[""")
+            append(page.entries.joinToString(","))
+            append("""],"nextCursor":${page.nextCursor}""")
+            append(""","retainedRange":{"oldest":${page.oldestCursor ?: "null"},"newest":${page.newestCursor ?: "null"}}""")
+            append(""","gap":{"detected":${page.gapDetected},"requestedAfter":${page.requestedAfter}}""")
+            append(""","evictedCount":${page.evictedCount},"droppedCount":${page.droppedCount},"truncated":${page.truncated}}""")
+        }
+
+    private fun parseQuery(target: String): Map<String, String> =
+        target.substringAfter('?', "")
+            .split('&')
+            .mapNotNull {
+                val separator = it.indexOf('=')
+                if (separator <= 0) null
+                else it.substring(0, separator) to it.substring(separator + 1)
+            }
+            .toMap()
 
     private class WsClient(private val socket: Socket) {
         private val output: OutputStream = socket.getOutputStream()
@@ -251,8 +462,29 @@ class DebugLogServer(
     companion object {
         const val DEFAULT_PORT = 8099
         const val MAX_QUEUED_FRAMES = 500
+        private const val SERVER_BACKLOG = 8
+        private const val STATE_OBSERVATION_INTERVAL_MS = 500L
+        private const val STATE_HEARTBEAT_INTERVAL_MS = 5_000L
         private const val TAG = "RLT"
         private const val WS_GUID = "258EAFA5-E914-47DA-95CA-5AB5DC11D65E"
+        private val STATE_JSON = kotlinx.serialization.json.Json {
+            encodeDefaults = true
+        }
+
+        private fun severity(level: String): String = when (level) {
+            "E" -> "error"
+            "W" -> "warning"
+            else -> "info"
+        }
+
+        private fun jsonString(value: String): String =
+            kotlinx.serialization.json.Json.encodeToString(
+                kotlinx.serialization.serializer<String>(),
+                value
+            )
+
+        private fun encodeStrings(values: List<String>): String =
+            values.joinToString(prefix = "[", postfix = "]") { jsonString(it) }
 
         fun encodeWsFrame(text: String, opcode: Int = 0x1): ByteArray {
             val payload = text.toByteArray(Charsets.UTF_8)

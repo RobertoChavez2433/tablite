@@ -82,11 +82,47 @@ class NativeTelemetryIngressServer(
             socket.use {
                 val input = it.getInputStream()
                 while (running.get()) {
-                    val line = readBoundedLine(input) ?: break
-                    if (line.contains("RLT_FRAME_RATE_V1") && line.length <= MAX_LINE_CHARS) {
-                        listener(line)
+                    val readToken = TelemetryCostTracker.begin(
+                        TelemetryCostTracker.Stage.NATIVE_INGRESS_READ
+                    )
+                    val line = try {
+                        readBoundedLine(input)
+                    } finally {
+                        TelemetryCostTracker.end(
+                            TelemetryCostTracker.Stage.NATIVE_INGRESS_READ,
+                            readToken
+                        )
+                    } ?: break
+                    val normalizeToken = TelemetryCostTracker.begin(
+                        TelemetryCostTracker.Stage.NATIVE_INGRESS_NORMALIZE,
+                        byteCount = line.length.toLong()
+                    )
+                    val normalized = try {
+                        normalizeAllowlistedSummary(line)
+                    } finally {
+                        TelemetryCostTracker.end(
+                            TelemetryCostTracker.Stage.NATIVE_INGRESS_NORMALIZE,
+                            normalizeToken
+                        )
+                    }
+                    if (normalized != null) {
+                        val dispatchToken = TelemetryCostTracker.begin(
+                            TelemetryCostTracker.Stage.NATIVE_INGRESS_DISPATCH,
+                            byteCount = normalized.length.toLong()
+                        )
+                        try {
+                            listener(normalized)
+                        } finally {
+                            TelemetryCostTracker.end(
+                                TelemetryCostTracker.Stage.NATIVE_INGRESS_DISPATCH,
+                                dispatchToken
+                            )
+                        }
                     } else {
                         rejectedLines.incrementAndGet()
+                        TelemetryCostTracker.recordDrop(
+                            TelemetryCostTracker.Stage.NATIVE_INGRESS_NORMALIZE
+                        )
                     }
                 }
             }
@@ -118,9 +154,44 @@ class NativeTelemetryIngressServer(
         }
     }
 
+    private fun normalizeAllowlistedSummary(line: String): String? {
+        if (line.length > MAX_LINE_CHARS) return null
+        val normalized = line.removePrefix(RLAWT_LOG_PREFIX)
+        return normalized.takeIf { candidate ->
+            ALLOWLISTED_RECORD_PREFIXES.any(candidate::startsWith)
+        }
+    }
+
     companion object {
         const val DEFAULT_PORT = 8100
         private const val BACKLOG = 2
-        private const val MAX_LINE_CHARS = 2_048
+        // Native diagnostic windows can include bounded per-stage quartiles.
+        // Keep this aligned with the canonical payload sanitizer ceiling.
+        private const val MAX_LINE_CHARS = 4_096
+        private const val RLAWT_LOG_PREFIX = "[rlawt] "
+        private const val PRODUCER_RECORD_PREFIX = "RLT_FRAME_RATE_V1 "
+        private const val VIRGL_RECORD_PREFIX = "RLT_VIRGL_WORKER_V1 "
+        private const val MESA_VTEST_RECORD_PREFIX = "RLT_MESA_VTEST_V1 "
+        private const val VIRGL_HOST_RECORD_PREFIX = "RLT_VIRGL_HOST_V1 "
+        private const val VTEST_TRANSPORT_RECORD_PREFIX = "RLT_VTEST_TRANSPORT_V1 "
+        private const val VTEST_FENCE_RECORD_PREFIX = "RLT_VTEST_FENCE_V1 "
+        private const val FRAME_STREAM_RECORD_PREFIX = "RLT_FRAME_STREAM_V1 "
+        private const val AHB_STREAM_RECORD_PREFIX = "RLT_AHB_STREAM_V1 "
+        private const val AHB_GPU_RECORD_PREFIX = "RLT_AHB_GPU_V1 "
+        private const val DIRECT_TRANSFER_RECORD_PREFIX = "RLT_DIRECT_TRANSFER_V1 "
+        private const val TELEMETRY_COST_RECORD_PREFIX = "RLT_TELEMETRY_COST_V1 "
+        private val ALLOWLISTED_RECORD_PREFIXES = listOf(
+            PRODUCER_RECORD_PREFIX,
+            VIRGL_RECORD_PREFIX,
+            MESA_VTEST_RECORD_PREFIX,
+            VIRGL_HOST_RECORD_PREFIX,
+            VTEST_TRANSPORT_RECORD_PREFIX,
+            VTEST_FENCE_RECORD_PREFIX,
+            FRAME_STREAM_RECORD_PREFIX,
+            AHB_STREAM_RECORD_PREFIX,
+            AHB_GPU_RECORD_PREFIX,
+            DIRECT_TRANSFER_RECORD_PREFIX,
+            TELEMETRY_COST_RECORD_PREFIX
+        )
     }
 }

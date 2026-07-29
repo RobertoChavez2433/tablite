@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.SystemClock
 import com.runelitetablet.BuildConfig
 import com.runelitetablet.logging.AppLog
+import com.runelitetablet.logging.AgentDiagnosticsSession
 import com.runelitetablet.logging.DebugLogServer
 import com.runelitetablet.perf.PerfDashboard
 import com.runelitetablet.perf.ProducerRateTracker
@@ -48,15 +49,46 @@ class AppContainer(private val context: Context) {
     val captureController: CaptureController = LocalCaptureController(context)
     fun createTermuxProcessPin(): TermuxProcessPin = TermuxProcessPin(context)
 
+    val agentDiagnosticsSession: AgentDiagnosticsSession? = if (BuildConfig.DEBUG) {
+        AgentDiagnosticsSession.create(context, DebugLogServer.DEFAULT_PORT)
+    } else null
     val debugLogServer: DebugLogServer? = if (BuildConfig.DEBUG) {
-        DebugLogServer(core.lineProcessLauncher).also { AppLog.startDebugServer(it) }
+        DebugLogServer(
+            lineProcessLauncher = core.lineProcessLauncher,
+            diagnosticsSession = requireNotNull(agentDiagnosticsSession)
+        ).also { AppLog.startDebugServer(it) }
     } else null
     private val nativeTelemetryIngress = NativeTelemetryIngressServer(core.logger) { message ->
-        ProducerRateTracker.parse(message)?.let { sample ->
-            val outcome = perf.dashboard.updateProducerStats(sample)
-            if (outcome != ProducerRateTracker.UpdateOutcome.ACCEPTED) {
-                core.logger.perf("PRODUCER-RATE-UPDATE: outcome=$outcome")
+        when {
+            message.startsWith("RLT_FRAME_RATE_V1 ") -> {
+                AppLog.nativeIngress("producer", message)
+                ProducerRateTracker.parse(message)?.let { sample ->
+                    val outcome = perf.dashboard.updateProducerStats(sample)
+                    if (outcome != ProducerRateTracker.UpdateOutcome.ACCEPTED) {
+                        core.logger.perf("PRODUCER-RATE-UPDATE: outcome=$outcome")
+                    }
+                }
             }
+            message.startsWith("RLT_VIRGL_WORKER_V1 ") ->
+                AppLog.nativeIngress("virgl_worker", message)
+            message.startsWith("RLT_MESA_VTEST_V1 ") ->
+                AppLog.nativeIngress("mesa_vtest", message)
+            message.startsWith("RLT_VIRGL_HOST_V1 ") ->
+                AppLog.nativeIngress("virgl_host", message)
+            message.startsWith("RLT_VTEST_TRANSPORT_V1 ") ->
+                AppLog.nativeIngress("vtest_transport", message)
+            message.startsWith("RLT_VTEST_FENCE_V1 ") ->
+                AppLog.nativeIngress("vtest_fence", message)
+            message.startsWith("RLT_FRAME_STREAM_V1 ") ->
+                AppLog.nativeIngress("frame_stream", message)
+            message.startsWith("RLT_AHB_STREAM_V1 ") ->
+                AppLog.nativeIngress("ahb_stream", message)
+            message.startsWith("RLT_AHB_GPU_V1 ") ->
+                AppLog.nativeIngress("ahb_gpu", message)
+            message.startsWith("RLT_DIRECT_TRANSFER_V1 ") ->
+                AppLog.nativeIngress("direct_transfer", message)
+            message.startsWith("RLT_TELEMETRY_COST_V1 ") ->
+                AppLog.nativeIngress("telemetry_cost", message)
         }
     }
 
