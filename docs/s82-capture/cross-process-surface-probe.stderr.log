@@ -1,7 +1,0 @@
-[P] EGL 1.5 initialized
-[C] EGL 1.5 initialized
-[C] consumer ready fd_start=14
-[P] producer ready fd_start=14 iters=100
-[P] producer done fd_start=14 fd_mid=17 fd_end=17 fails=0
-[C] consumer received sentinel; clean exit
-[C] consumer done iters=100 ok=100 fail=0 recv_fail=0 import_fail=0 fd_start=14 fd_mid=17 fd_end=17

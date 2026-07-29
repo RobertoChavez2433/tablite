@@ -1,4 +1,0 @@
-# Build artifacts from the feasibility probes — source/build script live in
-# scripts/, JSON output is committed, but the AArch64 ELF binaries are not.
-egl-compat-probe
-cross-process-surface-probe
