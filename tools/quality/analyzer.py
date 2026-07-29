@@ -117,6 +117,42 @@ CAPTURE_INTERACTION_PATTERNS = (
     re.compile(r"\buiautomator\b", re.IGNORECASE),
     re.compile(r"\b(screencap|screenrecord)\b", re.IGNORECASE),
 )
+OBSERVABILITY_LITERAL_TAGS = frozenset(
+    {
+        "AUTH",
+        "BUFFER",
+        "CLEANUP",
+        "CMD",
+        "CPU_BOOST",
+        "DI",
+        "DirectSurface",
+        "DISPLAY",
+        "FD",
+        "FD_TRACKER",
+        "FRAME",
+        "GL",
+        "HANDOFF",
+        "HOST_VSYNC",
+        "HTTP",
+        "HYBRID_X11",
+        "INSTALL",
+        "IPC",
+        "JANK",
+        "LIFECYCLE",
+        "NATIVE",
+        "PERF",
+        "PRESENTATION",
+        "SCRIPT",
+        "SESSION",
+        "STATE",
+        "STEP",
+        "SURFACE",
+        "SurfaceControlProbe",
+        "THREAD",
+        "UI",
+        "VERIFY",
+    }
+)
 POLICY_CONTRACT = (
     "runelite_client_gamepack_gpu_plugin_must_match_official = $true",
     "rlawt_java_classes_must_match_upstream = $true",
@@ -594,6 +630,503 @@ def check_script_batch_transport(root: Path) -> list[Diagnostic]:
     return diagnostics
 
 
+def check_canonical_observability_boundary(root: Path) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    allowed_android_log = {
+        Path("logging/AppLog.kt"),
+        Path("logging/DebugLogServer.kt"),
+        Path("logging/LogFileWriter.kt"),
+    }
+    app_log_tag = re.compile(
+        r'AppLog\.(?:d|i|w|e|shell)\(\s*"([A-Za-z0-9_]+)"'
+    )
+    for path in _source_files(root, KOTLIN_ROOT, {".kt"}):
+        relative = path.relative_to(root / KOTLIN_ROOT)
+        for line_no, line in enumerate(_read(path).splitlines(), 1):
+            if (
+                ("import android.util.Log" in line or re.search(r"\bLog\.[diwev]\(", line))
+                and relative not in allowed_android_log
+            ):
+                diagnostics.append(
+                    _line_diagnostic(
+                        root,
+                        path,
+                        line_no,
+                        "TBL015",
+                        "canonical_observability_boundary",
+                        "Production diagnostics must flow through AppLog; direct Android Log is adapter-only.",
+                    )
+                )
+            if ".broadcast(" in line and relative not in {
+                Path("logging/AppLog.kt"),
+                Path("logging/DebugLogServer.kt"),
+            }:
+                diagnostics.append(
+                    _line_diagnostic(
+                        root,
+                        path,
+                        line_no,
+                        "TBL015",
+                        "canonical_observability_boundary",
+                        "Only AppLog may publish directly to the agent diagnostics server.",
+                    )
+                )
+            match = app_log_tag.search(line)
+            if match and match.group(1) not in OBSERVABILITY_LITERAL_TAGS:
+                diagnostics.append(
+                    _line_diagnostic(
+                        root,
+                        path,
+                        line_no,
+                        "TBL016",
+                        "observability_catalog_integrity",
+                        f"Literal observability tag '{match.group(1)}' is not declared in the canonical catalog.",
+                    )
+                )
+    return diagnostics
+
+
+def check_agent_diagnostics_contract(root: Path) -> list[Diagnostic]:
+    logging_root = root / KOTLIN_ROOT / "logging"
+    if not logging_root.exists():
+        return []
+    contracts = {
+        logging_root / "DebugLogServer.kt": (
+            'InetAddress.getByName("127.0.0.1")',
+            '"/v1/capabilities"',
+            '"/v1/health"',
+            '"/v1/logs"',
+            '"/v1/state"',
+            '"/v1/state/events"',
+            "session.authorize",
+            "DiagnosticLogStore",
+            "AgentStatePublisher",
+        ),
+        logging_root / "DiagnosticLogStore.kt": (
+            "maxEntries",
+            "maxBytes",
+            "maxEntryBytes",
+            "maxPageBytes",
+            "gapDetected",
+            "droppedCount",
+            "evictedCount",
+        ),
+        logging_root / "ObservabilityPayloadSanitizer.kt": (
+            "redacted-email",
+            "redacted-jwt",
+            "Bearer [redacted]",
+            "MAX_MESSAGE_CHARS",
+        ),
+        logging_root / "ObservabilityEventCatalog.kt": (
+            "object ObservabilityEventCatalog",
+            "fun eventClass",
+            "fun isDeclared",
+            'it.startsWith("native_")',
+        ),
+        logging_root / "AppLog.kt": (
+            "fun nativeIngress",
+            'source = "native_ingress"',
+        ),
+        root / KOTLIN_ROOT / "telemetry/NativeTelemetryIngressServer.kt": (
+            'InetAddress.getByName("127.0.0.1")',
+            "ALLOWLISTED_RECORD_PREFIXES",
+            '"RLT_FRAME_RATE_V1 "',
+            '"RLT_VIRGL_WORKER_V1 "',
+            '"RLT_MESA_VTEST_V1 "',
+            '"RLT_VIRGL_HOST_V1 "',
+            '"RLT_VTEST_FENCE_V1 "',
+            '"RLT_FRAME_STREAM_V1 "',
+            '"RLT_AHB_STREAM_V1 "',
+            '"RLT_AHB_GPU_V1 "',
+            '"RLT_DIRECT_TRANSFER_V1 "',
+            "MAX_LINE_CHARS",
+        ),
+        root / KOTLIN_ROOT / "di/AppContainer.kt": (
+            'AppLog.nativeIngress("producer", message)',
+            'AppLog.nativeIngress("virgl_worker", message)',
+            'AppLog.nativeIngress("mesa_vtest", message)',
+            'AppLog.nativeIngress("virgl_host", message)',
+            'AppLog.nativeIngress("vtest_fence", message)',
+            'AppLog.nativeIngress("frame_stream", message)',
+            'AppLog.nativeIngress("ahb_stream", message)',
+            'AppLog.nativeIngress("ahb_gpu", message)',
+            'AppLog.nativeIngress("direct_transfer", message)',
+        ),
+        root / KOTLIN_ROOT / "directsurface/DirectSurfaceHostActivity.kt": (
+            "HybridInputController(rootView, lorieView)",
+            "inputController.bindPointerTarget(surfaceView",
+            "LorieView(this)",
+            "setZOrderOnTop(true)",
+            "computeDirectOverlayLayout(",
+            "frameDimensions()",
+            "RLT_DIRECT_LAYOUT_V1",
+            "right_chrome_px=",
+        ),
+        root / KOTLIN_ROOT / "directsurface/RlawtSurfaceServer.kt": (
+            "fun frameDimensions(): Pair<Int, Int>?",
+            "nativeFrameDimensions(handle)",
+            "fun startCompositor(",
+            "nativeStartCompositor(",
+        ),
+        root / "runelite-tablet/app/src/main/cpp/rlawtsurface/rlawt_surface_consumer.c": (
+            "atomic_uint frame_width",
+            "atomic_uint frame_height",
+            "nativeFrameDimensions",
+            "atomic_store(&c->frame_width, width)",
+            "atomic_store(&c->frame_height, height)",
+            "rlt_xlorie_external_pool_set",
+            "rlt_xlorie_external_frame_ready",
+            "stage=handoff",
+            "stage=release",
+        ),
+        root / "third_party/termux-x11-upstream/app/src/main/cpp/lorie/renderer.c": (
+            "rlt_xlorie_external_pool_set",
+            "rlt_xlorie_external_frame_ready",
+            "rlt_xlorie_external_pool_clear",
+            "stage=frame",
+            "queue_wait_ns=",
+            "root_draw_ns=",
+            "external_draw_ns=",
+            "cursor_draw_ns=",
+            "fence_ns=",
+            "swap_ns=",
+            "release_ns=",
+        ),
+        root / "runelite-tablet/app/src/main/assets/scripts/launch-runelite-native.sh": (
+            "RLT_VTEST_TELEMETRY_PATH",
+            "rlt-frame-telemetry-v1.shm",
+            'RLT_(FRAME_RATE|FRAME_STREAM|AHB_STREAM|AHB_GPU|DIRECT_TRANSFER|MESA_VTEST|VIRGL_HOST|VTEST_TRANSPORT|VTEST_FENCE|TELEMETRY_COST)_V1',
+            "frame_stream_display_policy=$RLT_FRAME_STREAM_DISPLAY_POLICY",
+            "TCP4:127.0.0.1:8100",
+        ),
+        root / "scripts/capture-frame-pipeline.ps1": (
+            'files/app-virgl-$runId.log',
+            '"app-virgl-host.log"',
+            '"exec-out", "run-as", "com.runelitetablet", "cat", $appVirglLogRemotePath',
+            "$joinedInputs += $appVirglLog",
+        ),
+        root / "third_party/termux-packages/packages/mesa/rlt_frame_telemetry.h": (
+            "RLT_FRAME_TELEMETRY_MAGIC",
+            "RLT_FRAME_TELEMETRY_ABI_VERSION 1U",
+            "RLT_FRAME_TELEMETRY_SIZE 64U",
+            "active_producer_seq",
+        ),
+        root / "third_party/termux-packages/packages/mesa/0020-rlt-vtest-frame-telemetry.patch": (
+            "RLT_MESA_VTEST_V1",
+            "RLT_VTEST_COMPLETION_WAIT",
+            "rlt_vtest_complete_frame",
+            "RLT_VTEST_WINDOW_FRAMES 30",
+        ),
+        root / "third_party/termux-packages/packages/mesa/0022-rlt-frame-stream-bypass-x11-display.patch": (
+            "RLT_FRAME_STREAM_BYPASS_X11_DISPLAY",
+            "bypassed_frame_stream",
+            "displaytarget_display",
+        ),
+        root / "third_party/termux-packages/packages/mesa/0023-rlt-vtest-frame-marker.patch": (
+            "VCMD_RLT_FRAME_MARKER",
+            "rlt_vtest_send_active_frame_marker",
+            "active_begin_monotonic_ns",
+            "frame_marker_wall_ns",
+            "frame_marker_thread_cpu_ns",
+        ),
+        root / "third_party/termux-packages/packages/mesa/0024-rlt-direct-host-transfer.patch": (
+            "VCMD_RLT_TRANSFER_GET_DIRECT",
+            "host_present_no_guest_payload",
+            "virgl_vtest_send_transfer_get_direct",
+        ),
+        root / "third_party/virglrenderer-1.3.0/vtest/vtest_protocol.h": (
+            "VCMD_RLT_FRAME_MARKER 39",
+            "VCMD_RLT_FRAME_MARKER_SIZE 4",
+            "VCMD_RLT_TRANSFER_GET_DIRECT 40",
+        ),
+        root / "third_party/virglrenderer-1.3.0/vtest/vtest_renderer.c": (
+            "vtest_rlt_frame_marker",
+            "rlt_host_set_remote_frame",
+            "RLT_HOST_MARKER_RECEIVE",
+            "RLT_DIRECT_TRANSFER_V1",
+            "guest_payload_suppressed",
+            "RLT_VTEST_FENCE_V1",
+            "stale_state_reset",
+            "outcome=still_waiting",
+            "outcome=recovered",
+            "poll(&poll_fd, 1, 100)",
+        ),
+        root / "third_party/virglrenderer-1.3.0/vtest/rlt_host_telemetry.c": (
+            "remote_frame_active",
+            "remote_producer_seq",
+            "marker_receive",
+        ),
+        root / "third_party/virglrenderer-1.3.0/vtest/rlt_frame_stream.c": (
+            "RLT_FRAME_STREAM_V1",
+            "copy_ns=",
+            "enqueue_to_send_ns=",
+            "send_ns=",
+            "frames_superseded=",
+            "send_failures=",
+        ),
+        root / "third_party/virglrenderer-1.3.0/vtest/rlt_ahb_frame_stream.c": (
+            "RLT_AHB_STREAM_V1",
+            "RLT_AHB_GPU_V1",
+            "acquire_wait_ns=",
+            "lock_ns=",
+            "copy_ns=",
+            "unlock_ns=",
+            "fence_wait_ns=",
+            "ready_send_ns=",
+            "failures=",
+        ),
+        root / "tools/frame_stream_summary.py": (
+            "mesa_virgl_join_complete",
+            "minimum_attribution_pct",
+            "frames_superseded",
+            "send_failures",
+            "sequence_gaps",
+            "invalid_frames",
+            "_cumulative_mean_ns",
+        ),
+        root / "tools/ahb_stream_summary.py": (
+            "target_90_fps_gate_met",
+            "active_handoff_work_us",
+            "acquire_wait",
+            "copy_throughput_gb_s",
+            "failures",
+        ),
+        root / "third_party/termux-packages/packages/virglrenderer-android/0011-rlt-host-completion-telemetry.patch.beforehostbuild": (
+            "RLT_VIRGL_HOST_V1",
+            "RLT_HOST_WINDOW 30U",
+            "RLT_HOST_TRANSFER_EXEC",
+            "RLT_HOST_POLL_FD_WAIT",
+            "rlt_host_complete_busy_wait",
+            "rlt_host_finish_accumulator",
+            "rlt_host_stage_begin",
+            "rlt_host_stage_end",
+            "configuration_checked",
+            "saw_completion",
+        ),
+        root / "third_party/rlawt/rlawt_nix.c": (
+            '#include "rlt_frame_telemetry.h"',
+            "rlawt_frame_telemetry_begin",
+            "rlawt_frame_telemetry_end",
+        ),
+    }
+    diagnostics: list[Diagnostic] = []
+    for path, markers in contracts.items():
+        if not path.exists():
+            diagnostics.append(
+                Diagnostic(
+                    path=path.relative_to(root).as_posix(),
+                    line=1,
+                    code="TBL017",
+                    rule="agent_diagnostics_contract",
+                    message="The canonical agent diagnostics contract file is required.",
+                )
+            )
+            continue
+        source = _read(path)
+        for marker in markers:
+            if marker not in source:
+                diagnostics.append(
+                    _line_diagnostic(
+                        root,
+                        path,
+                        1,
+                        "TBL017",
+                        "agent_diagnostics_contract",
+                        f"Canonical diagnostics marker '{marker}' is missing.",
+                    )
+                )
+    return diagnostics
+
+
+def check_telemetry_overhead_contract(root: Path) -> list[Diagnostic]:
+    if not (root / "tools/telemetry_overhead.py").exists():
+        return []
+    contracts = {
+        root / "scripts/perfetto/frame-pipeline.pbtxt": (
+            'name: "android.surfaceflinger.frametimeline"',
+        ),
+        root / "scripts/capture-frame-pipeline.ps1": (
+            "tools/perfetto_frame_timeline.py",
+            "frame-timeline-summary.json",
+            "frame-timeline-intervals.csv",
+            "collected_external_common_per_frame_observer",
+        ),
+        root / "scripts/analyze-frame-capture.ps1": (
+            "valid_external_common_off_summary_observer",
+            "external_frame_timeline",
+            "overhead_gate_eligible",
+        ),
+        root / "tools/perfetto_frame_timeline.py": (
+            "android.surfaceflinger.frametimeline",
+            "/system/bin/surfaceflinger",
+            "surface_frame_token IS NULL",
+            "not producer-correlated",
+        ),
+        root / "tools/telemetry_overhead.py": (
+            "THROUGHPUT_LOSS_LIMIT_PERCENT = 2.0",
+            "P95_INCREASE_LIMIT_MS = 0.2",
+            "MINIMUM_PAIR_COUNT = 3",
+            "all(item[\"passed\"] for item in complete_pairs)",
+            "summary_overhead_gate_failed_closed",
+        ),
+        root / "scripts/run-telemetry-overhead-campaign.ps1": (
+            '@("OFF", "SUMMARY")',
+            '@("SUMMARY", "OFF")',
+            "launch_and_stop_only",
+            "login_performed = $false",
+            "gameplay_performed = $false",
+        ),
+        root / "runelite-tablet/app/src/main/assets/scripts/launch-runelite-native.sh": (
+            'RLT_TELEMETRY_MODE" == "BURST"',
+            'RLT_TELEMETRY_MODE" == "DEEP"',
+            'RLT_VTEST_STAGE_TELEMETRY="disabled_off_summary"',
+            "vtest_stage_telemetry=$RLT_VTEST_STAGE_TELEMETRY",
+        ),
+    }
+    diagnostics: list[Diagnostic] = []
+    for path, markers in contracts.items():
+        if not path.exists():
+            diagnostics.append(
+                Diagnostic(
+                    path=path.relative_to(root).as_posix(),
+                    line=1,
+                    code="TBL018",
+                    rule="telemetry_overhead_contract",
+                    message="The external OFF/SUMMARY overhead contract file is required.",
+                )
+            )
+            continue
+        source = _read(path)
+        for marker in markers:
+            if marker not in source:
+                diagnostics.append(
+                    _line_diagnostic(
+                        root,
+                        path,
+                        1,
+                        "TBL018",
+                        "telemetry_overhead_contract",
+                        f"Telemetry overhead marker '{marker}' is missing.",
+                    )
+                )
+    return diagnostics
+
+
+def check_telemetry_self_observation_contract(root: Path) -> list[Diagnostic]:
+    tracker = root / KOTLIN_ROOT / "telemetry/TelemetryCostTracker.kt"
+    if not tracker.exists():
+        return []
+    contracts = {
+        tracker: (
+            'FRAME_RECORDER("frame_recorder")',
+            'NATIVE_INGRESS_READ("native_ingress_read")',
+            'NATIVE_INGRESS_NORMALIZE("native_ingress_normalize")',
+            'NATIVE_INGRESS_DISPATCH("native_ingress_dispatch")',
+            'PAYLOAD_SANITIZE("payload_sanitize")',
+            'RETAINED_STORE("retained_store")',
+            'EXPORT_EVENTS("export_events")',
+            "MEASUREMENT_STRIDE = 64L",
+            "measuredThreadCpuNs",
+            "queueHighWaterMark",
+        ),
+        root / KOTLIN_ROOT / "telemetry/TelemetryExporter.kt": (
+            "app-telemetry-cost-v1.json",
+            "TelemetryCostTracker.snapshot",
+            "TelemetryStageCostV1",
+        ),
+        root / KOTLIN_ROOT / "telemetry/NativeTelemetryIngressServer.kt": (
+            "NATIVE_INGRESS_READ",
+            "NATIVE_INGRESS_NORMALIZE",
+            "NATIVE_INGRESS_DISPATCH",
+            "TelemetryCostTracker.recordDrop",
+        ),
+        root / KOTLIN_ROOT / "logging/AppLog.kt": (
+            "PAYLOAD_SANITIZE",
+            "LOG_ROUTE",
+        ),
+        root / KOTLIN_ROOT / "logging/DebugLogServer.kt": (
+            "JSON_ENCODE",
+            "RETAINED_STORE",
+            "WEBSOCKET_QUEUE",
+        ),
+        root / "runelite-tablet/app/src/main/assets/scripts/launch-runelite-native.sh": (
+            'RLT_TELEMETRY_SELF_PROFILE="1"',
+            "stage=native_bridge",
+            "RLT_TELEMETRY_COST_V1",
+        ),
+        root / "third_party/rlawt/rlawt_nix.c": (
+            "stage=rlawt_producer",
+            "measured_thread_cpu_ns",
+            "record_emit_excluded=1",
+        ),
+        root / "third_party/virglrenderer-1.3.0/vtest/rlt_host_telemetry.c": (
+            "stage=virgl_host",
+            "CLOCK_THREAD_CPUTIME_ID",
+            "record_emit_excluded=1",
+        ),
+        root / "third_party/virglrenderer-1.3.0/vtest/rlt_frame_stream.c": (
+            "copy_ns=",
+            "enqueue_to_send_ns=",
+            "transfer_to_send_ns=",
+            "send_ns=",
+            "queue_high_water_mark=",
+            "frames_superseded=",
+            "send_failures=",
+        ),
+        root / "third_party/virglrenderer-1.3.0/vtest/rlt_ahb_frame_stream.c": (
+            "acquire_wait_ns=",
+            "lock_ns=",
+            "copy_ns=",
+            "unlock_ns=",
+            "fence_wait_ns=",
+            "ready_send_ns=",
+        ),
+        root / "third_party/termux-packages/packages/mesa/0020-rlt-vtest-frame-telemetry.patch": (
+            "stage=mesa_vtest",
+            "CLOCK_THREAD_CPUTIME_ID",
+            "RLT_TELEMETRY_COST_V1",
+        ),
+        root / "third_party/termux-packages/packages/mesa/0023-rlt-vtest-frame-marker.patch": (
+            "frame_marker_calls=",
+            "frame_marker_bytes=",
+            "frame_marker_wall_ns=",
+            "frame_marker_thread_cpu_ns=",
+        ),
+        root / "tools/telemetry_cost_summary.py": (
+            "external FrameTimeline",
+            "estimated_thread_cpu_ns",
+            "stage_wall_ns_noncritical_path_sum",
+        ),
+    }
+    diagnostics: list[Diagnostic] = []
+    for path, markers in contracts.items():
+        if not path.exists():
+            diagnostics.append(
+                Diagnostic(
+                    path=path.relative_to(root).as_posix(),
+                    line=1,
+                    code="TBL019",
+                    rule="telemetry_self_observation_contract",
+                    message="The telemetry self-observation contract file is required.",
+                )
+            )
+            continue
+        source = _read(path)
+        for marker in markers:
+            if marker not in source:
+                diagnostics.append(
+                    _line_diagnostic(
+                        root,
+                        path,
+                        1,
+                        "TBL019",
+                        "telemetry_self_observation_contract",
+                        f"Telemetry self-cost marker '{marker}' is missing.",
+                    )
+                )
+    return diagnostics
+
+
 ARCHITECTURE_CHECKS = (
     check_domain_purity,
     check_ui_boundaries,
@@ -608,6 +1141,10 @@ ARCHITECTURE_CHECKS = (
     check_frame_handoff_contract,
     check_producer_presentation_identity,
     check_script_batch_transport,
+    check_canonical_observability_boundary,
+    check_agent_diagnostics_contract,
+    check_telemetry_overhead_contract,
+    check_telemetry_self_observation_contract,
 )
 ARCHITECTURE_RULE_BUDGET_MS = 1_000.0
 ARCHITECTURE_TOTAL_BUDGET_MS = 5_000.0

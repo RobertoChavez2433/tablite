@@ -31,6 +31,14 @@ function Get-Stats {
 
 $capturePath = (Resolve-Path -LiteralPath $CaptureDirectory).Path
 $deadlineNs = 1000000000.0 / $TargetHz
+$frameTimelinePath = Join-Path $capturePath "frame-timeline-summary.json"
+$frameTimelineSummary = if (Test-Path -LiteralPath $frameTimelinePath) {
+    Get-Content -LiteralPath $frameTimelinePath -Raw | ConvertFrom-Json
+} else { $null }
+$telemetryCostPath = Join-Path $capturePath "telemetry-cost-summary.json"
+$telemetryCostSummary = if (Test-Path -LiteralPath $telemetryCostPath) {
+    Get-Content -LiteralPath $telemetryCostPath -Raw | ConvertFrom-Json
+} else { $null }
 $rlawtCsv = Get-ChildItem -LiteralPath $capturePath -Recurse -File |
     Where-Object { $_.Name -match "^rlawt.*frames?\.csv$|^rlawt-perframe\.csv$" } |
     Select-Object -First 1
@@ -204,6 +212,17 @@ $rlawtGapMeanMsValues = New-Object System.Collections.Generic.List[double]
 $rlawtGapP50MsValues = New-Object System.Collections.Generic.List[double]
 $rlawtGapP95MsValues = New-Object System.Collections.Generic.List[double]
 $rlawtGapMaxMsValues = New-Object System.Collections.Generic.List[double]
+$compositeRunIds = New-Object System.Collections.Generic.List[string]
+$compositeFrameSeqs = New-Object System.Collections.Generic.List[long]
+$compositeOutcomes = New-Object System.Collections.Generic.List[string]
+$compositeQueueWaitMsValues = New-Object System.Collections.Generic.List[double]
+$compositeRootDrawMsValues = New-Object System.Collections.Generic.List[double]
+$compositeExternalDrawMsValues = New-Object System.Collections.Generic.List[double]
+$compositeCursorDrawMsValues = New-Object System.Collections.Generic.List[double]
+$compositeFenceMsValues = New-Object System.Collections.Generic.List[double]
+$compositeSwapMsValues = New-Object System.Collections.Generic.List[double]
+$compositeReleaseMsValues = New-Object System.Collections.Generic.List[double]
+$compositeTotalMsValues = New-Object System.Collections.Generic.List[double]
 $producerWindowsByKey = @{}
 $producerWindowInvalidCount = 0
 $producerWindowDuplicateCount = 0
@@ -377,6 +396,27 @@ $telemetryLogFiles | ForEach-Object {
             }
         }
         if (
+            $_ -match "RLT_XLORIE_COMPOSITE_V1\s+run_id=([^\s]+)\s+stage=frame\s+outcome=([^\s]+).*frame_seq=([0-9]+)"
+        ) {
+            $compositeRunIds.Add($Matches[1])
+            $compositeOutcomes.Add($Matches[2])
+            $compositeFrameSeqs.Add([long]$Matches[3])
+            foreach ($field in @(
+                @{ Name = "queue_wait_ns"; Target = $compositeQueueWaitMsValues },
+                @{ Name = "root_draw_ns"; Target = $compositeRootDrawMsValues },
+                @{ Name = "external_draw_ns"; Target = $compositeExternalDrawMsValues },
+                @{ Name = "cursor_draw_ns"; Target = $compositeCursorDrawMsValues },
+                @{ Name = "fence_ns"; Target = $compositeFenceMsValues },
+                @{ Name = "swap_ns"; Target = $compositeSwapMsValues },
+                @{ Name = "release_ns"; Target = $compositeReleaseMsValues },
+                @{ Name = "total_ns"; Target = $compositeTotalMsValues }
+            )) {
+                if ($_ -match "$($field.Name)=([0-9]+)") {
+                    $field.Target.Add(([double]$Matches[1]) / 1000000.0)
+                }
+            }
+        }
+        if (
             $isProducerWindowSource -and
             $_ -match "\[rlawt-perf\].*swap_us mean=([0-9]+) p50=([0-9]+) p95=([0-9]+) max=([0-9]+)\s+gap_us mean=([0-9]+) p50=([0-9]+) p95=([0-9]+) max=([0-9]+)"
         ) {
@@ -527,6 +567,9 @@ $summary = [ordered]@{
         accepted_fps = $null
         submitted_fps = $canonicalSubmittedFps
         presented_fps = $canonicalPresentedFps
+        external_surfaceflinger_frame_timeline_hz = if ($null -ne $frameTimelineSummary) {
+            $frameTimelineSummary.throughput_hz
+        } else { $null }
         display_vsync_hz = $null
         xlorie_consumer_redraw_rate_hz = if ($xlorieConsumerRedrawRateHzValues.Count -gt 0) {
             ($xlorieConsumerRedrawRateHzValues | Measure-Object -Average).Average
@@ -575,6 +618,13 @@ $summary = [ordered]@{
             status = if ($presentationProducerCorrelated) {
                 "valid_producer_sequence_correlated_display_timestamps"
             } else { "unavailable_no_correlated_presentation_events" }
+        }
+        external_surfaceflinger_frame_timeline_hz = [ordered]@{
+            status = if ($null -ne $frameTimelineSummary) {
+                "valid_external_common_off_summary_observer"
+            } else { "unavailable_perfetto_frame_timeline_not_analyzed" }
+            source = "android.surfaceflinger.frametimeline"
+            producer_correlated = $false
         }
         display_vsync_hz = [ordered]@{ status = "unavailable_not_in_frame_event_source" }
         xlorie_consumer_redraw_rate_hz = [ordered]@{
@@ -641,6 +691,31 @@ $summary = [ordered]@{
         } else {
             "no_summary_window_boundary_exceeded_target_or_data_unavailable"
         }
+    }
+    xlorie_composite = [ordered]@{
+        sample_count = $compositeFrameSeqs.Count
+        sample_scope = "first_five_then_every_sixtieth_completed_frame"
+        run_ids = @($compositeRunIds | Sort-Object -Unique)
+        run_id_matches_capture = (
+            $compositeRunIds.Count -gt 0 -and
+            $null -ne $captureId -and
+            @($compositeRunIds | Where-Object { $_ -ne $captureId }).Count -eq 0
+        )
+        first_sampled_frame_seq = if ($compositeFrameSeqs.Count -gt 0) {
+            ($compositeFrameSeqs | Measure-Object -Minimum).Minimum
+        } else { $null }
+        last_sampled_frame_seq = if ($compositeFrameSeqs.Count -gt 0) {
+            ($compositeFrameSeqs | Measure-Object -Maximum).Maximum
+        } else { $null }
+        failed_outcomes = @($compositeOutcomes | Where-Object { $_ -ne "presented" }).Count
+        queue_wait_ms = Get-Stats @($compositeQueueWaitMsValues)
+        root_draw_ms = Get-Stats @($compositeRootDrawMsValues)
+        external_draw_ms = Get-Stats @($compositeExternalDrawMsValues)
+        cursor_draw_ms = Get-Stats @($compositeCursorDrawMsValues)
+        fence_ms = Get-Stats @($compositeFenceMsValues)
+        swap_ms = Get-Stats @($compositeSwapMsValues)
+        release_ms = Get-Stats @($compositeReleaseMsValues)
+        total_ms = Get-Stats @($compositeTotalMsValues)
     }
     x11_handoff = [ordered]@{
         source_ordinal_gaps = if ($sourceOrdinalGapCounts.Count -gt 0) {
@@ -730,6 +805,34 @@ $summary = [ordered]@{
             ($presentationLastProducerSeqs | Measure-Object -Maximum).Maximum
         } else { $null }
     }
+    external_frame_timeline = if ($null -ne $frameTimelineSummary) {
+        [ordered]@{
+            source = $frameTimelineSummary.source
+            measurement_scope = $frameTimelineSummary.measurement_scope
+            frame_count = $frameTimelineSummary.frame_count
+            interval_count = $frameTimelineSummary.interval_count
+            throughput_hz = $frameTimelineSummary.throughput_hz
+            interval_ms = $frameTimelineSummary.interval_ms
+            duplicate_timestamp_count = $frameTimelineSummary.duplicate_timestamp_count
+            jank_frame_count = $frameTimelineSummary.jank_frame_count
+            jank_frame_percent = $frameTimelineSummary.jank_frame_percent
+            producer_correlated = $false
+            overhead_gate_eligible = $true
+        }
+    } else { $null }
+    telemetry_self_cost = if ($null -ne $telemetryCostSummary) {
+        [ordered]@{
+            source = "telemetry-cost-summary.json"
+            estimated_thread_cpu_ns = $telemetryCostSummary.totals.estimated_thread_cpu_ns
+            stage_wall_ns_noncritical_path_sum =
+                $telemetryCostSummary.totals.stage_wall_ns_noncritical_path_sum
+            bytes = $telemetryCostSummary.totals.bytes
+            dropped = $telemetryCostSummary.totals.dropped
+            issues = @($telemetryCostSummary.issues)
+            stages = @($telemetryCostSummary.stages)
+            interpretation = $telemetryCostSummary.interpretation
+        }
+    } else { $null }
     producer_interval_ms = Get-Stats @($producerIntervalsNs | ForEach-Object { $_ / 1000000.0 })
     frame_generation_ms = Get-Stats @($generationUs | ForEach-Object { $_ / 1000.0 })
     swap_or_submit_ms = Get-Stats @($swapUs | ForEach-Object { $_ / 1000.0 })
@@ -791,7 +894,13 @@ $report = @"
 - Accepted FPS: unavailable
 - Submitted FPS: $(Format-Value $canonicalSubmittedFps)
 - Uniquely presented FPS: $(Format-Value $canonicalPresentedFps)
+- External SurfaceFlinger FrameTimeline rate: $(Format-Value $(if ($null -ne $frameTimelineSummary) { $frameTimelineSummary.throughput_hz } else { $null }) " Hz") — common OFF/SUMMARY observer, not producer-correlated
+- External frame-interval p95: $(Format-Value $(if ($null -ne $frameTimelineSummary) { $frameTimelineSummary.interval_ms.p95 } else { $null }) " ms") — raw per-frame distribution from Perfetto FrameTimeline
+- Telemetry internal estimated thread CPU: $(Format-Value $(if ($null -ne $telemetryCostSummary) { $telemetryCostSummary.totals.estimated_thread_cpu_ns / 1000000.0 } else { $null }) " ms") across this capture; drops: $(if ($null -ne $telemetryCostSummary) { $telemetryCostSummary.totals.dropped } else { "unavailable" })
+- Highest telemetry CPU stages: $(if ($null -ne $telemetryCostSummary -and @($telemetryCostSummary.stages).Count -gt 0) { (@($telemetryCostSummary.stages | Select-Object -First 5 | ForEach-Object { "$($_.stage)=$([Math]::Round($_.estimated_thread_cpu_ns / 1000000.0, 3))ms" }) -join ", ") } else { "unavailable" })
 - Xlorie consumer redraw rate: $(Format-Value $(if ($xlorieConsumerRedrawRateHzValues.Count -gt 0) { ($xlorieConsumerRedrawRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — diagnostic only
+- Xlorie composite samples: $($compositeFrameSeqs.Count) (first five, then every sixtieth); run-id match: $(if ($compositeRunIds.Count -gt 0 -and $null -ne $captureId -and @($compositeRunIds | Where-Object { $_ -ne $captureId }).Count -eq 0) { "yes" } else { "unavailable/no" })
+- Xlorie composite sampled p95: queue $(Format-Value (Get-Percentile @($compositeQueueWaitMsValues) 95) " ms"), root $(Format-Value (Get-Percentile @($compositeRootDrawMsValues) 95) " ms"), external $(Format-Value (Get-Percentile @($compositeExternalDrawMsValues) 95) " ms"), cursor $(Format-Value (Get-Percentile @($compositeCursorDrawMsValues) 95) " ms"), fence $(Format-Value (Get-Percentile @($compositeFenceMsValues) 95) " ms"), swap $(Format-Value (Get-Percentile @($compositeSwapMsValues) 95) " ms")
 - X11 GLX swap request rate: $(Format-Value $(if ($x11GlxSwapRequestRateHzValues.Count -gt 0) { ($x11GlxSwapRequestRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz") — diagnostic until ordinal validation
 - X11 damage request rate: $(Format-Value $(if ($x11DamageRequestRateHzValues.Count -gt 0) { ($x11DamageRequestRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz")
 - Ordered producer-sequence marker rate: $(Format-Value $(if ($x11ProducerMarkerRateHzValues.Count -gt 0) { ($x11ProducerMarkerRateHzValues | Measure-Object -Average).Average } else { $null }) " Hz"); errors: $producerMarkerErrorTotal

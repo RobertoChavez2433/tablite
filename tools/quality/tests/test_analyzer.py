@@ -168,6 +168,57 @@ class ArchitectureAnalyzerTest(unittest.TestCase):
         self.assertTrue(diagnostics)
         self.assertTrue(all(item.code == "TBL014" for item in diagnostics))
 
+    def test_direct_android_logging_outside_adapter_is_rejected(self) -> None:
+        diagnostics = self._analyze(
+            {
+                "runelite-tablet/app/src/main/java/com/runelitetablet/setup/Bad.kt":
+                    "package com.runelitetablet.setup\n"
+                    "import android.util.Log\n"
+                    'fun bad() = Log.e("RLT", "bypass")\n'
+            }
+        )
+        self.assertTrue(any(item.code == "TBL015" for item in diagnostics))
+
+    def test_undeclared_literal_observability_tag_is_rejected(self) -> None:
+        diagnostics = self._analyze(
+            {
+                "runelite-tablet/app/src/main/java/com/runelitetablet/setup/Bad.kt":
+                    "package com.runelitetablet.setup\n"
+                    'fun bad() = AppLog.i("NEW_ISLAND", "bypass")\n'
+            }
+        )
+        self.assertEqual(["TBL016"], [item.code for item in diagnostics])
+
+    def test_incomplete_telemetry_overhead_contract_is_rejected(self) -> None:
+        diagnostics = self._analyze(
+            {
+                "tools/telemetry_overhead.py":
+                    "THROUGHPUT_LOSS_LIMIT_PERCENT = 2.0\n"
+            }
+        )
+        overhead = [item for item in diagnostics if item.code == "TBL018"]
+        self.assertTrue(overhead)
+        self.assertTrue(
+            all(item.rule == "telemetry_overhead_contract" for item in overhead)
+        )
+
+    def test_incomplete_telemetry_self_observation_contract_is_rejected(self) -> None:
+        diagnostics = self._analyze(
+            {
+                "runelite-tablet/app/src/main/java/com/runelitetablet/"
+                "telemetry/TelemetryCostTracker.kt":
+                    'FRAME_RECORDER("frame_recorder")\n'
+            }
+        )
+        self_cost = [item for item in diagnostics if item.code == "TBL019"]
+        self.assertTrue(self_cost)
+        self.assertTrue(
+            all(
+                item.rule == "telemetry_self_observation_contract"
+                for item in self_cost
+            )
+        )
+
     def test_fast_analyzer_contract_is_strictly_under_sixty_seconds(self) -> None:
         self.assertEqual(60_000.0, FAST_ANALYZER_BUDGET_MS)
 

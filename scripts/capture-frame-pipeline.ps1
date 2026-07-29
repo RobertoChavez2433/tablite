@@ -5,6 +5,8 @@ param(
     [ValidateRange(30, 240)]
     [int]$TargetHz = 120,
     [string]$OutputRoot,
+    [string]$TraceProcessor,
+    [switch]$SkipFrameTimelineAnalysis,
     [switch]$SkipJfr
 )
 
@@ -136,6 +138,8 @@ $captureDir = Join-Path $OutputRoot "$timestamp-$runId"
 New-Item -ItemType Directory -Path $captureDir -Force | Out-Null
 
 $nativeLogRemotePath = "/data/data/com.termux/files/home/runelite-native.log"
+$virglLogRemotePath = "/data/data/com.termux/files/home/virgl-server.log"
+$appVirglLogRemotePath = "files/app-virgl-$runId.log"
 $nativeLogSizeResult = Invoke-Adb @(
     "shell", "run-as", "com.termux", "stat", "-c", "%s", $nativeLogRemotePath
 ) -AllowFailure
@@ -144,6 +148,17 @@ $nativeLogStartBytes = if (
     $nativeLogSizeResult.Output.Trim() -match "^[0-9]+$"
 ) {
     [long]$nativeLogSizeResult.Output.Trim()
+} else {
+    $null
+}
+$virglLogSizeResult = Invoke-Adb @(
+    "shell", "run-as", "com.termux", "stat", "-c", "%s", $virglLogRemotePath
+) -AllowFailure
+$virglLogStartBytes = if (
+    $virglLogSizeResult.ExitCode -eq 0 -and
+    $virglLogSizeResult.Output.Trim() -match "^[0-9]+$"
+) {
+    [long]$virglLogSizeResult.Output.Trim()
 } else {
     $null
 }
@@ -212,9 +227,39 @@ $nativeLogEndBytes = if (
 } else {
     $null
 }
+$virglLogEndSizeResult = Invoke-Adb @(
+    "shell", "run-as", "com.termux", "stat", "-c", "%s", $virglLogRemotePath
+) -AllowFailure
+$virglLogEndBytes = if (
+    $virglLogEndSizeResult.ExitCode -eq 0 -and
+    $virglLogEndSizeResult.Output.Trim() -match "^[0-9]+$"
+) {
+    [long]$virglLogEndSizeResult.Output.Trim()
+} else {
+    $null
+}
 
 Invoke-Adb @("pull", $deviceTrace, (Join-Path $captureDir "system.perfetto-trace")) | Out-Null
 Invoke-Adb @("shell", "rm", "-f", $deviceTrace) -AllowFailure | Out-Null
+
+$frameTimelineStatus = "skipped"
+if (-not $SkipFrameTimelineAnalysis) {
+    $frameTimelineArgs = @(
+        (Join-Path $projectRoot "tools/perfetto_frame_timeline.py"),
+        (Join-Path $captureDir "system.perfetto-trace"),
+        "--output", (Join-Path $captureDir "frame-timeline-summary.json"),
+        "--intervals-output", (Join-Path $captureDir "frame-timeline-intervals.csv"),
+        "--bootstrap"
+    )
+    if ($TraceProcessor) {
+        $frameTimelineArgs += @("--trace-processor", $TraceProcessor)
+    }
+    & python @frameTimelineArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "SurfaceFlinger FrameTimeline analysis failed"
+    }
+    $frameTimelineStatus = "collected_external_common_per_frame_observer"
+}
 
 $deviceInfo = [ordered]@{
     serial = $Serial
@@ -247,10 +292,18 @@ function Export-RunAsTree {
 $appCaptureStatus = Export-RunAsTree "com.runelitetablet" "files/captures/$runId" (Join-Path $captureDir "app")
 $termuxCaptureStatus = Export-RunAsTree "com.termux" "files/home/.rlt/captures/$runId" (Join-Path $captureDir "termux")
 
-foreach ($remoteLog in @("files/home/runelite-native.log", "files/home/runelite-launch.log")) {
+foreach ($remoteLog in @(
+    "files/home/runelite-native.log",
+    "files/home/runelite-launch.log",
+    "files/home/virgl-server.log"
+)) {
     $name = Split-Path -Leaf $remoteLog
     [void](Export-AdbBinary @("exec-out", "run-as", "com.termux", "cat", $remoteLog) (Join-Path $captureDir $name) -AllowFailure)
 }
+$appVirglLog = Join-Path $captureDir "app-virgl-host.log"
+[void](Export-AdbBinary @(
+    "exec-out", "run-as", "com.runelitetablet", "cat", $appVirglLogRemotePath
+) $appVirglLog -AllowFailure)
 if (
     $null -ne $nativeLogStartBytes -and
     $null -ne $nativeLogEndBytes -and
@@ -263,6 +316,19 @@ if (
         "if=$nativeLogRemotePath", "bs=1",
         "skip=$nativeLogStartBytes", "count=$captureWindowBytes", "status=none"
     ) (Join-Path $captureDir "runelite-native-capture-window.log") -AllowFailure)
+}
+if (
+    $null -ne $virglLogStartBytes -and
+    $null -ne $virglLogEndBytes -and
+    $virglLogEndBytes -ge $virglLogStartBytes
+) {
+    $virglCaptureWindowBytes = $virglLogEndBytes - $virglLogStartBytes
+    [void](Export-AdbBinary @(
+        "exec-out", "run-as", "com.termux",
+        "/data/data/com.termux/files/usr/bin/dd",
+        "if=$virglLogRemotePath", "bs=1",
+        "skip=$virglLogStartBytes", "count=$virglCaptureWindowBytes", "status=none"
+    ) (Join-Path $captureDir "virgl-server-capture-window.log") -AllowFailure)
 }
 
 $sensitivePattern = "(?i)(JX_(?:SESSION_ID|CHARACTER_ID|DISPLAY_NAME)|access_token|refresh_token)\s*[=:]\s*([^\s,`"']+)"
@@ -301,6 +367,8 @@ $manifest = [ordered]@{
     duration_seconds = $DurationSeconds
     native_log_start_bytes = $nativeLogStartBytes
     native_log_end_bytes = $nativeLogEndBytes
+    virgl_log_start_bytes = $virglLogStartBytes
+    virgl_log_end_bytes = $virglLogEndBytes
     target_hz = $TargetHz
     app_target_hz = $appTargetHz
     renderer_backend = $rendererBackend
@@ -308,6 +376,7 @@ $manifest = [ordered]@{
     git_commit = $gitCommit
     git_dirty = $gitDirty
     jfr = $jfrStatus
+    frame_timeline_analysis = $frameTimelineStatus
     app_capture = $appCaptureStatus
     termux_capture = $termuxCaptureStatus
     device = $deviceInfo
@@ -321,6 +390,42 @@ $manifest = [ordered]@{
 }
 $manifest | ConvertTo-Json -Depth 8 |
     Set-Content -LiteralPath (Join-Path $captureDir "manifest.json") -Encoding utf8
+
+& python (Join-Path $projectRoot "tools/telemetry_cost_summary.py") `
+    $captureDir --output (Join-Path $captureDir "telemetry-cost-summary.json")
+$telemetryCostExit = $LASTEXITCODE
+if ($telemetryCostExit -notin @(0, 2)) {
+    throw "Telemetry self-cost analysis failed with exit code $telemetryCostExit"
+}
+
+if ($telemetryMode -in @("BURST", "DEEP")) {
+    $nativeWindowLog = Join-Path $captureDir "runelite-native-capture-window.log"
+    if (-not (Test-Path -LiteralPath $nativeWindowLog)) {
+        $nativeWindowLog = Join-Path $captureDir "runelite-native.log"
+    }
+    $virglWindowLog = Join-Path $captureDir "virgl-server-capture-window.log"
+    if (-not (Test-Path -LiteralPath $virglWindowLog)) {
+        $virglWindowLog = Join-Path $captureDir "virgl-server.log"
+    }
+    $joinedInputs = @($nativeWindowLog, $virglWindowLog)
+    if (Test-Path -LiteralPath $appVirglLog) {
+        $joinedInputs += $appVirglLog
+    }
+    & python (Join-Path $projectRoot "tools/mesa_vtest_summary.py") `
+        --agent-logs @joinedInputs --run-id $runId `
+        --output (Join-Path $captureDir "mesa-vtest-summary.json") `
+        --report (Join-Path $captureDir "mesa-vtest-report.md")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Mesa vtest summary join input failed"
+    }
+    & python (Join-Path $projectRoot "tools/virgl_host_summary.py") `
+        --agent-logs @joinedInputs --run-id $runId `
+        --output (Join-Path $captureDir "virgl-host-summary.json") `
+        --report (Join-Path $captureDir "virgl-host-report.md")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Mesa/VirGL host join failed"
+    }
+}
 
 & (Join-Path $PSScriptRoot "analyze-frame-capture.ps1") `
     -CaptureDirectory $captureDir -TargetHz $TargetHz
